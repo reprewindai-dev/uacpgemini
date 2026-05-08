@@ -67,6 +67,7 @@ export default function App() {
   const [intent, setIntent] = useState("");
   const [loading, setLoading] = useState(false);
   const [compileError, setCompileError] = useState<string | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [events, setEvents] = useState<any[]>([]);
@@ -74,6 +75,7 @@ export default function App() {
   const [ssrnData, setSsrnData] = useState<SSRNSignal[]>([]);
   const [identity, setIdentity] = useState<string>("ANON_AGENT");
   const socketRef = useRef<WebSocket | null>(null);
+  const activePlan = plans[0];
 
   useEffect(() => {
     // Initial Bootstrap
@@ -167,6 +169,41 @@ export default function App() {
       setCompileError(error instanceof Error ? error.message : "Compilation failed");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleExportSchema = () => {
+    if (!activePlan) {
+      setExportMessage("No plan available to export");
+      return;
+    }
+
+    try {
+      const safeName = activePlan.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "uacp-plan";
+
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        plan: activePlan,
+      };
+
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${safeName}-${activePlan.id}-schema.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      setExportMessage("Schema downloaded");
+    } catch (error) {
+      console.error("Export error:", error);
+      setExportMessage("Schema export failed");
     }
   };
 
@@ -389,19 +426,29 @@ export default function App() {
                     <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Plan Hierarchy Revision 1.0.4</p>
                    </div>
                    <div className="flex gap-4">
-                     {plans.length > 0 && (
+                     {activePlan && (
                        <div className="px-4 py-2 bg-blue-500/10 border border-blue-500/20 rounded-md flex items-center gap-3">
                          <div className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
-                         <span className="text-[9px] font-mono text-blue-200 uppercase tracking-widest">Directive: {plans[0].name}</span>
+                         <span className="text-[9px] font-mono text-blue-200 uppercase tracking-widest">Directive: {activePlan.name}</span>
                        </div>
                      )}
-                     <button className="text-[10px] font-mono text-white/50 hover:text-blue-400 transition-colors px-4 py-2 border border-white/10 rounded uppercase tracking-widest">
+                     <button
+                      onClick={handleExportSchema}
+                      disabled={!activePlan}
+                      className="text-[10px] font-mono text-white/50 hover:text-blue-400 transition-colors px-4 py-2 border border-white/10 rounded uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed"
+                     >
                       Export Schema
                      </button>
                    </div>
-                </div>
+                 </div>
 
-                {plans.length > 0 && (
+                {exportMessage && (
+                  <div className="mb-6 text-right">
+                    <span className="text-[9px] font-mono uppercase tracking-[0.3em] text-blue-300/80">{exportMessage}</span>
+                  </div>
+                )}
+
+                {activePlan && (
                   <motion.div 
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -423,9 +470,9 @@ export default function App() {
                 )}
 
                 <div className="flex-1 flex items-center justify-center overflow-auto custom-scrollbar p-12">
-                   {plans.length > 0 ? (
+                   {activePlan ? (
                      <div className="flex items-center gap-12 relative animate-in fade-in duration-700">
-                        {plans[0].graph?.nodes?.map((node: any, idx: number) => (
+                        {activePlan.graph?.nodes?.map((node: any, idx: number) => (
                           <div key={`${node.id}-${idx}`} className="relative group shrink-0">
                             <motion.div 
                               initial={{ y: 20, opacity: 0 }}
@@ -479,7 +526,7 @@ export default function App() {
                             </motion.div>
                             
                             {/* Connector Lines with Flow Effect */}
-                            {idx < plans[0].graph.nodes.length - 1 && (
+                            {idx < activePlan.graph.nodes.length - 1 && (
                               <div className="absolute top-1/2 -right-12 w-12 h-px z-0">
                                 <div className="absolute inset-0 bg-white/10" />
                                 <motion.div 
@@ -501,9 +548,9 @@ export default function App() {
                 </div>
 
                 <div className="mt-auto pt-12 flex justify-center">
-                  {plans.length > 0 && (
+                  {activePlan && (
                     <button 
-                      onClick={() => handleStartRun(plans[0].id)}
+                      onClick={() => handleStartRun(activePlan.id)}
                       className="px-12 py-3 border border-white/10 text-[10px] uppercase font-bold tracking-[0.4em] hover:bg-white hover:text-black transition-all shadow-xl active:scale-95"
                     >
                       Commit Sequence to Control Plane
