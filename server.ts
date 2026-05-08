@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
@@ -6,8 +7,6 @@ import path from "path";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import { XMLParser } from "fast-xml-parser";
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 interface SSRNSignal {
   id: string;
@@ -106,9 +105,478 @@ interface AppEvent {
   metadata?: any;
 }
 
+type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
+
 let plans: Plan[] = [];
 let runs: Run[] = [];
 let events: AppEvent[] = [];
+
+function getGroqConfig() {
+  const apiKey = process.env.GROQ_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    baseUrl: process.env.GROQ_BASE_URL?.trim() || "https://api.groq.com/openai/v1",
+    model: process.env.GROQ_MODEL?.trim() || "llama-3.1-8b-instant",
+  };
+}
+
+function getHuggingFaceConfig() {
+  const token = process.env.HF_TOKEN?.trim();
+  if (!token) {
+    return null;
+  }
+
+  return {
+    token,
+    baseUrl: process.env.HF_API_URL?.trim() || "https://router.huggingface.co/v1",
+    model: process.env.HF_MODEL?.trim() || "meta-llama/Llama-3.1-8B-Instruct:fastest",
+  };
+}
+
+function getOllamaConfig() {
+  const model = process.env.OLLAMA_MODEL?.trim();
+  if (!model) {
+    return null;
+  }
+
+  return {
+    baseUrl: process.env.OLLAMA_BASE_URL?.trim() || "http://127.0.0.1:11434",
+    model,
+  };
+}
+
+function getGeminiConfig() {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    model: process.env.GEMINI_MODEL?.trim() || "gemini-3-flash-preview",
+  };
+}
+
+function cleanModelText(text: string) {
+  return text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+}
+
+function normalizeProviderName(value: string | undefined | null): ModelProvider | null {
+  switch ((value || "").trim().toLowerCase()) {
+    case "groq":
+      return "groq";
+    case "huggingface":
+    case "hugging_face":
+    case "hf":
+      return "huggingface";
+    case "ollama":
+      return "ollama";
+    case "gemini":
+      return "gemini";
+    case "fallback":
+      return "fallback";
+    default:
+      return null;
+  }
+}
+
+function getProviderOrder(): ModelProvider[] {
+  const envPreferred = [
+    normalizeProviderName(process.env.AI_PROVIDER),
+    normalizeProviderName(process.env.LLM_PROVIDER),
+    normalizeProviderName(process.env.AI_FALLBACK_PROVIDER),
+  ].filter((provider): provider is ModelProvider => provider !== null && provider !== "fallback");
+
+  return [...new Set<ModelProvider>([
+    ...envPreferred,
+    "groq",
+    "huggingface",
+    "ollama",
+    "gemini",
+  ])];
+}
+
+function isProviderConfigured(provider: ModelProvider) {
+  switch (provider) {
+    case "groq":
+      return getGroqConfig() !== null;
+    case "huggingface":
+      return getHuggingFaceConfig() !== null;
+    case "ollama":
+      return getOllamaConfig() !== null;
+    case "gemini":
+      return getGeminiConfig() !== null;
+    case "fallback":
+      return true;
+    default:
+      return false;
+  }
+}
+
+async function requestGroq(prompt: string, expectJson: boolean) {
+  const groq = getGroqConfig();
+  if (!groq) {
+    throw new Error("Groq is not configured");
+  }
+
+  const response = await fetch(`${groq.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${groq.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: groq.model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      response_format: expectJson ? { type: "json_object" } : undefined,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Groq request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error("Groq returned an empty response");
+  }
+
+  return { provider: "groq" as const, text: cleanModelText(text) };
+}
+
+async function requestHuggingFace(prompt: string, expectJson: boolean) {
+  const huggingFace = getHuggingFaceConfig();
+  if (!huggingFace) {
+    throw new Error("Hugging Face is not configured");
+  }
+
+  const response = await fetch(`${huggingFace.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${huggingFace.token}`,
+    },
+    body: JSON.stringify({
+      model: huggingFace.model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      response_format: expectJson ? { type: "json_object" } : undefined,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Hugging Face request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error("Hugging Face returned an empty response");
+  }
+
+  return { provider: "huggingface" as const, text: cleanModelText(text) };
+}
+
+async function requestOllama(prompt: string, expectJson: boolean) {
+  const ollama = getOllamaConfig();
+  if (!ollama) {
+    throw new Error("Ollama is not configured");
+  }
+
+  const response = await fetch(`${ollama.baseUrl.replace(/\/$/, "")}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: ollama.model,
+      prompt,
+      stream: false,
+      format: expectJson ? "json" : undefined,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Ollama request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data?.response;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error("Ollama returned an empty response");
+  }
+
+  return { provider: "ollama" as const, text: cleanModelText(text) };
+}
+
+async function requestGemini(prompt: string, expectJson: boolean) {
+  const gemini = getGeminiConfig();
+  if (!gemini) {
+    throw new Error("Gemini is not configured");
+  }
+
+  const ai = new GoogleGenAI({ apiKey: gemini.apiKey });
+  const response = await ai.models.generateContent({
+    model: gemini.model,
+    contents: prompt,
+    config: expectJson ? { responseMimeType: "application/json" } : undefined,
+  });
+
+  const text = response.text;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error("Gemini returned an empty response");
+  }
+
+  return { provider: "gemini" as const, text: cleanModelText(text) };
+}
+
+async function generateModelText(prompt: string, expectJson: boolean) {
+  const failures: string[] = [];
+
+  for (const provider of getProviderOrder()) {
+    if (!isProviderConfigured(provider)) {
+      continue;
+    }
+
+    try {
+      switch (provider) {
+        case "groq":
+          return await requestGroq(prompt, expectJson);
+        case "huggingface":
+          return await requestHuggingFace(prompt, expectJson);
+        case "ollama":
+          return await requestOllama(prompt, expectJson);
+        case "gemini":
+          return await requestGemini(prompt, expectJson);
+        default:
+          break;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${provider} request failed`;
+      failures.push(`${provider}: ${message}`);
+      console.error(`${provider} error:`, error);
+    }
+  }
+
+  throw new Error(failures.join(" | ") || "No model providers are configured");
+}
+
+function parseJsonText(text: string) {
+  return JSON.parse(cleanModelText(text));
+}
+
+function buildCompilePlanPrompt(intent: string) {
+  return `
+    You are the Quantum UACP Deterministic Orchestrator.
+    Translate the user's intent into a hybrid quantum-classical orchestration plan.
+
+    User intent: "${intent}"
+
+    Return only JSON with this shape:
+    {
+      "name": "Concise identifier",
+      "graph": {
+        "nodes": [
+          {
+            "id": "node-1",
+            "type": "quantum" | "classical",
+            "description": "Specific action",
+            "policy_tag": "AC-10",
+            "entropy": 0.4
+          }
+        ],
+        "edges": [{ "from": "node-1", "to": "node-2" }]
+      }
+    }
+  `;
+}
+
+function buildRunSummaryPrompt(plan: Plan | undefined) {
+  return `
+    You are the Quantum UACP Intelligence Agent.
+    The user intent was: "${plan?.intent || "Unknown"}"
+    The current research signals include: ${ssrnSignals.map((signal) => signal.title).join(", ")}
+    The current market state is: ${marketConvergence.map((entry) => `${entry.label}: ${entry.value}`).join(", ")}
+
+    Provide a concise final outcome report in exactly 2 sentences.
+  `;
+}
+
+function normalizeNodeType(value: unknown): "quantum" | "classical" {
+  return typeof value === "string" && value.toLowerCase().includes("quantum")
+    ? "quantum"
+    : "classical";
+}
+
+function normalizeEntropy(value: unknown, fallback: number) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function createPlanName(intent: string) {
+  const words = intent
+    .trim()
+    .replace(/[^\w\s-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 4);
+
+  if (words.length === 0) {
+    return "Deterministic Directive";
+  }
+
+  return words
+    .map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function createFallbackPlanDraft(intent: string) {
+  const directive = intent.trim().replace(/\s+/g, " ").slice(0, 96);
+  const nodes = [
+    {
+      id: "ingest",
+      type: "classical" as const,
+      description: `Interpret directive: ${directive}`,
+      policy_tag: "AC-10",
+      entropy: 0.08,
+    },
+    {
+      id: "model",
+      type: "quantum" as const,
+      description: "Model candidate execution paths and isolate the highest-confidence branch.",
+      policy_tag: "Q-17",
+      entropy: 0.41,
+    },
+    {
+      id: "validate",
+      type: "classical" as const,
+      description: "Validate policy alignment, safety controls, and execution preconditions.",
+      policy_tag: "AC-GLOBAL",
+      entropy: 0.11,
+    },
+    {
+      id: "commit",
+      type: "classical" as const,
+      description: "Commit the approved sequence to the control plane and persist the run contract.",
+      policy_tag: "OPS-22",
+      entropy: 0.05,
+    },
+  ];
+
+  return {
+    name: createPlanName(intent),
+    graph: {
+      nodes,
+      edges: nodes.slice(0, -1).map((node, index) => ({
+        from: node.id,
+        to: nodes[index + 1].id,
+      })),
+    },
+  };
+}
+
+function normalizeCompiledPlan(planData: any, intent: string) {
+  const fallback = createFallbackPlanDraft(intent);
+  const rawNodes = Array.isArray(planData?.graph?.nodes) ? planData.graph.nodes : [];
+  const normalizedNodes = rawNodes
+    .map((node: any, index: number) => {
+      const description = typeof node?.description === "string" ? node.description.trim() : "";
+      if (!description) {
+        return null;
+      }
+
+      return {
+        id: typeof node?.id === "string" && node.id.trim() ? node.id.trim() : `node-${index + 1}`,
+        type: normalizeNodeType(node?.type),
+        description,
+        policy_tag: typeof node?.policy_tag === "string" && node.policy_tag.trim() ? node.policy_tag.trim() : `AC-${10 + index}`,
+        entropy: normalizeEntropy(node?.entropy, 0.18 + index * 0.09),
+      };
+    })
+    .filter(Boolean);
+
+  const nodes = normalizedNodes.length > 0 ? normalizedNodes : fallback.graph.nodes;
+  const validNodeIds = new Set(nodes.map((node) => node.id));
+  const normalizedEdges = Array.isArray(planData?.graph?.edges)
+    ? planData.graph.edges
+        .map((edge: any) => ({
+          from: typeof edge?.from === "string" ? edge.from.trim() : "",
+          to: typeof edge?.to === "string" ? edge.to.trim() : "",
+        }))
+        .filter((edge: { from: string; to: string }) => validNodeIds.has(edge.from) && validNodeIds.has(edge.to))
+    : [];
+
+  return {
+    name: typeof planData?.name === "string" && planData.name.trim() ? planData.name.trim() : fallback.name,
+    graph: {
+      nodes,
+      edges: normalizedEdges.length > 0
+        ? normalizedEdges
+        : nodes.slice(0, -1).map((node, index) => ({
+            from: node.id,
+            to: nodes[index + 1].id,
+          })),
+    },
+  };
+}
+
+async function compilePlanDraft(intent: string): Promise<{ plan: ReturnType<typeof normalizeCompiledPlan>; provider: ModelProvider }> {
+  const fallbackPlan = createFallbackPlanDraft(intent);
+
+  try {
+    const result = await generateModelText(buildCompilePlanPrompt(intent), true);
+    return {
+      plan: normalizeCompiledPlan(parseJsonText(result.text), intent),
+      provider: result.provider,
+    };
+  } catch (error) {
+    console.error("Plan compilation error:", error);
+    return {
+      plan: fallbackPlan,
+      provider: "fallback",
+    };
+  }
+}
+
+async function generateRunSummary(plan: Plan | undefined): Promise<{ text: string; provider: ModelProvider }> {
+  try {
+    const result = await generateModelText(buildRunSummaryPrompt(plan), false);
+    return {
+      text: result.text,
+      provider: result.provider,
+    };
+  } catch (error) {
+    console.error("Run summary error:", error);
+    return {
+      text: "Execution finalized. Deterministic outcomes verified across all research nodes.",
+      provider: "fallback",
+    };
+  }
+}
+
+function createPlanRecord(name: string, intent: string, graph: any): Plan {
+  return {
+    id: `p-${Math.random().toString(36).substring(2, 9)}`,
+    name: name || "AI Generated Plan",
+    intent,
+    revision: 1,
+    status: "draft",
+    graph: graph || { nodes: [], edges: [] },
+    createdAt: new Date().toISOString(),
+  };
+}
 
 function addEvent(type: string, message: string, metadata?: any) {
   const event: AppEvent = {
@@ -164,22 +632,45 @@ async function startServer() {
   app.get("/api/plans", (req, res) => res.json(plans));
   
   app.post("/api/plans", (req, res) => {
-    const { name, intent, graph } = req.body;
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    const intent = typeof req.body?.intent === "string" ? req.body.intent.trim() : "";
+    const graph = req.body?.graph;
+
     if (!intent) return res.status(400).json({ error: "Intent required" });
 
-    const newPlan: Plan = {
-      id: `p-${Math.random().toString(36).substring(2, 9)}`,
-      name: name || "AI Generated Plan",
-      intent,
-      revision: 1,
-      status: 'draft',
-      graph: graph || { nodes: [], edges: [] },
-      createdAt: new Date().toISOString()
-    };
+    const newPlan = createPlanRecord(name, intent, graph);
     
     plans.push(newPlan);
     addEvent('PLAN_CREATED', `New plan created: ${newPlan.id} (${newPlan.name})`, { planId: newPlan.id });
     res.json(newPlan);
+  });
+
+  app.post("/api/plans/compile", async (req, res) => {
+    const intent = typeof req.body?.intent === "string" ? req.body.intent.trim() : "";
+
+    if (!intent) {
+      return res.status(400).json({ error: "Intent required" });
+    }
+
+    if (intent.length > 4000) {
+      return res.status(400).json({ error: "Intent exceeds the 4000 character limit" });
+    }
+
+    try {
+      const compiledPlan = await compilePlanDraft(intent);
+      const newPlan = createPlanRecord(compiledPlan.plan.name, intent, compiledPlan.plan.graph);
+
+      plans.push(newPlan);
+      addEvent("PLAN_CREATED", `New plan created: ${newPlan.id} (${newPlan.name})`, {
+        planId: newPlan.id,
+        source: compiledPlan.provider,
+      });
+
+      res.status(201).json(newPlan);
+    } catch (error) {
+      console.error("Plan compile route error:", error);
+      res.status(500).json({ error: "Unable to compile plan" });
+    }
   });
 
   app.get("/api/runs", (req, res) => res.json(runs));
@@ -260,18 +751,8 @@ async function startServer() {
 
     // Final Intelligence Summary using AI
     try {
-      const result = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `
-          You are the Quantum UACP Intelligence Agent.
-          The user intent was: "${plan?.intent || 'Unknown'}"
-          The current research signals include: ${ssrnSignals.map(s => s.title).join(', ')}
-          The current market state is: ${marketConvergence.map(m => `${m.label}: ${m.value}`).join(', ')}
-          
-          Provide a concise (2 sentence) final outcome report for this orchestration.
-        `
-      });
-      run.output = result.text;
+      const summary = await generateRunSummary(plan);
+      run.output = summary.text;
     } catch (e) {
       console.error("Summary error:", e);
       run.output = "Execution finalized. Deterministic outcomes verified across all research nodes.";

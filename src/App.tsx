@@ -19,7 +19,6 @@ import {
   BrainCircuit
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { GoogleGenAI } from "@google/genai";
 import { 
   AreaChart, 
   Area, 
@@ -63,13 +62,11 @@ interface Run {
   output?: string;
 }
 
-// --- SDK Initialization ---
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-
 export default function App() {
   const [activeTab, setActiveTab] = useState<'intent' | 'execution' | 'ops'>('intent');
   const [intent, setIntent] = useState("");
   const [loading, setLoading] = useState(false);
+  const [compileError, setCompileError] = useState<string | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [events, setEvents] = useState<any[]>([]);
@@ -143,48 +140,31 @@ export default function App() {
   }, []);
 
   const handleCreatePlan = async () => {
-    if (!intent.trim() || loading) return;
+    const trimmedIntent = intent.trim();
+    if (!trimmedIntent || loading) return;
+
     setLoading(true);
+    setCompileError(null);
     
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `
-          You are the Quantum UACP Deterministic Orchestrator. 
-          Translate natural language intent into a hybrid quantum-classical orchestration plan.
-          
-          Intent: "${intent}"
-          
-          Return ONLY a JSON object:
-          {
-            "name": "Concise identifier",
-            "graph": {
-              "nodes": [
-                { "id": "NODE_ID", "type": "quantum|classical", "description": "Specific action", "policy_tag": "AC-10", "entropy": 0.4 }
-              ],
-              "edges": [{ "from": "NODE_ID", "to": "NODE_ID" }]
-            }
-          }
-        `,
-        config: {
-          responseMimeType: "application/json"
-        }
+      const res = await fetch("/api/plans/compile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent: trimmedIntent }),
       });
 
-      const planData = JSON.parse(response.text || "{}");
-      
-      const res = await fetch("/api/plans", {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...planData, intent })
-      });
-      if (!res.ok) throw new Error("Failed to save plan");
-      const savedPlan = await res.json();
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload.error || "Failed to compile plan");
+      }
+
+      const savedPlan = payload as Plan;
       setPlans(prev => [savedPlan, ...prev]);
       setIntent("");
       setActiveTab('execution');
     } catch (error) {
       console.error("Compilation error:", error);
+      setCompileError(error instanceof Error ? error.message : "Compilation failed");
     } finally {
       setLoading(false);
     }
@@ -331,7 +311,12 @@ export default function App() {
                         className="w-full h-48 bg-black/80 p-8 text-xl font-light italic text-white/90 placeholder:text-white/10 focus:outline-none resize-none transition-all focus:bg-black relative z-20"
                         placeholder="State your orchestration intent..."
                         value={intent}
-                        onChange={(e) => setIntent(e.target.value)}
+                        onChange={(e) => {
+                          setIntent(e.target.value);
+                          if (compileError) {
+                            setCompileError(null);
+                          }
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' && !e.shiftKey) {
                             e.preventDefault();
@@ -365,13 +350,18 @@ export default function App() {
                     disabled={loading || !intent.trim()}
                     onClick={handleCreatePlan}
                     className="w-full max-w-sm py-5 bg-white text-black text-[12px] uppercase tracking-[0.5em] font-black hover:bg-blue-600 hover:text-white transition-all disabled:opacity-10 group active:scale-[0.98] shadow-[0_20px_50px_rgba(255,255,255,0.1)] hover:shadow-blue-500/40"
+                    >
+                      <span className="flex items-center justify-center gap-4">
+                        SEND SIGNAL / EXECUTE
+                        <ChevronRight size={16} className="group-hover:translate-x-2 transition-transform" />
+                      </span>
+                    </button>
+                  <p
+                    className={`text-[9px] uppercase tracking-[0.4em] font-mono ${compileError ? "text-rose-400/90" : "text-white/10"}`}
+                    role={compileError ? "alert" : undefined}
                   >
-                    <span className="flex items-center justify-center gap-4">
-                      SEND SIGNAL / EXECUTE
-                      <ChevronRight size={16} className="group-hover:translate-x-2 transition-transform" />
-                    </span>
-                  </button>
-                  <p className="text-[9px] uppercase tracking-[0.4em] text-white/10 font-mono">Press [Enter] to transmit</p>
+                    {compileError || "Press [Enter] to transmit"}
+                  </p>
                 </div>
 
                 <div className="mt-auto flex justify-between items-end border-t border-white/5 pt-6 text-[9px] uppercase tracking-[0.2em] font-mono text-white/20">
