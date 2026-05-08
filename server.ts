@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { spawn, type ChildProcess } from "child_process";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
@@ -110,6 +111,9 @@ type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
 let plans: Plan[] = [];
 let runs: Run[] = [];
 let events: AppEvent[] = [];
+let ollamaProcess: ChildProcess | null = null;
+let ollamaBootstrapPromise: Promise<void> | null = null;
+let ollamaReady = false;
 
 function getGroqConfig() {
   const apiKey = process.env.GROQ_API_KEY?.trim();
@@ -147,6 +151,155 @@ function getOllamaConfig() {
     baseUrl: process.env.OLLAMA_BASE_URL?.trim() || "http://127.0.0.1:11434",
     model,
   };
+}
+
+function getOllamaAutostartEnabled() {
+  return process.env.OLLAMA_AUTOSTART?.trim().toLowerCase() === "true";
+}
+
+function getOllamaPullOnBootEnabled() {
+  return process.env.OLLAMA_PULL_ON_BOOT?.trim().toLowerCase() === "true";
+}
+
+function getOllamaStartupTimeoutMs() {
+  const parsed = Number(process.env.OLLAMA_STARTUP_TIMEOUT_MS || "120000");
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 120000;
+}
+
+function normalizeBaseUrl(baseUrl: string) {
+  return baseUrl.replace(/\/$/, "");
+}
+
+function isLocalOllamaBaseUrl(baseUrl: string) {
+  try {
+    const url = new URL(baseUrl);
+    return ["127.0.0.1", "localhost", "0.0.0.0"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function isOllamaReachable(baseUrl: string) {
+  try {
+    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/api/tags`);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForOllamaReady(baseUrl: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await isOllamaReachable(baseUrl)) {
+      ollamaReady = true;
+      return;
+    }
+
+    await delay(2000);
+  }
+
+  throw new Error(`Ollama did not become ready at ${baseUrl} within ${timeoutMs}ms`);
+}
+
+async function runOllamaCommand(args: string[]) {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("ollama", args, {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    let stderr = "";
+
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`ollama ${args.join(" ")} failed with exit code ${code}: ${stderr.trim()}`));
+    });
+  });
+}
+
+async function ensureOllamaReady() {
+  const ollama = getOllamaConfig();
+  if (!ollama) {
+    return;
+  }
+
+  if (ollamaReady && await isOllamaReachable(ollama.baseUrl)) {
+    return;
+  }
+
+  if (ollamaBootstrapPromise) {
+    return ollamaBootstrapPromise;
+  }
+
+  ollamaBootstrapPromise = (async () => {
+    const baseUrl = normalizeBaseUrl(ollama.baseUrl);
+    if (await isOllamaReachable(baseUrl)) {
+      ollamaReady = true;
+      return;
+    }
+
+    if (!getOllamaAutostartEnabled()) {
+      throw new Error(`Ollama is not reachable at ${baseUrl}. Set OLLAMA_AUTOSTART=true to let the app start it automatically.`);
+    }
+
+    if (!isLocalOllamaBaseUrl(baseUrl)) {
+      throw new Error(`OLLAMA_AUTOSTART only supports local OLLAMA_BASE_URL values. Received ${baseUrl}.`);
+    }
+
+    if (!ollamaProcess || ollamaProcess.exitCode !== null || ollamaProcess.killed) {
+      console.log(`Starting Ollama at ${baseUrl}...`);
+      ollamaProcess = spawn("ollama", ["serve"], {
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+
+      ollamaProcess.stdout?.on("data", (chunk) => {
+        console.log(`[ollama] ${chunk.toString().trim()}`);
+      });
+
+      ollamaProcess.stderr?.on("data", (chunk) => {
+        console.error(`[ollama] ${chunk.toString().trim()}`);
+      });
+
+      ollamaProcess.on("error", (error) => {
+        ollamaReady = false;
+        console.error("Failed to start Ollama:", error);
+      });
+
+      ollamaProcess.on("close", (code) => {
+        ollamaReady = false;
+        console.error(`Ollama exited with code ${code}`);
+      });
+    }
+
+    await waitForOllamaReady(baseUrl, getOllamaStartupTimeoutMs());
+
+    if (getOllamaPullOnBootEnabled()) {
+      console.log(`Ensuring Ollama model ${ollama.model} is present...`);
+      await runOllamaCommand(["pull", ollama.model]);
+    }
+  })().finally(() => {
+    ollamaBootstrapPromise = null;
+  });
+
+  return ollamaBootstrapPromise;
 }
 
 function getGeminiConfig() {
@@ -293,7 +446,9 @@ async function requestOllama(prompt: string, expectJson: boolean) {
     throw new Error("Ollama is not configured");
   }
 
-  const response = await fetch(`${ollama.baseUrl.replace(/\/$/, "")}/api/generate`, {
+  await ensureOllamaReady();
+
+  const response = await fetch(`${normalizeBaseUrl(ollama.baseUrl)}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -606,7 +761,7 @@ async function startServer() {
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ server: httpServer });
 
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || "3000");
 
   app.use(cors());
   app.use(express.json());
@@ -777,6 +932,12 @@ async function startServer() {
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  if (getOllamaConfig() && getOllamaAutostartEnabled()) {
+    void ensureOllamaReady().catch((error) => {
+      console.error("Ollama bootstrap error:", error);
     });
   }
 
