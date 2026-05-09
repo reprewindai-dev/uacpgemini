@@ -409,6 +409,11 @@ function getProviderRequestTimeoutMs() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 20000;
 }
 
+function getMaxIntentChars() {
+  const parsed = Number(process.env.MAX_INTENT_CHARS || "50000");
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 50000;
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit, label: string) {
   const controller = new AbortController();
   const timeoutMs = getProviderRequestTimeoutMs();
@@ -1711,8 +1716,9 @@ async function startServer() {
       return res.status(400).json({ error: "Intent required" });
     }
 
-    if (intent.length > 4000) {
-      return res.status(400).json({ error: "Intent exceeds the 4000 character limit" });
+    const maxIntentChars = getMaxIntentChars();
+    if (intent.length > maxIntentChars) {
+      return res.status(400).json({ error: `Intent exceeds the ${maxIntentChars} character limit` });
     }
 
     try {
