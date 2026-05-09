@@ -343,6 +343,10 @@ export default function App() {
   const certaintyWidth = `${Math.max(0, Math.min(1, certaintyIndex)) * 100}%`;
   const observabilityStage = typeof signals?.observability_stage === "string" ? signals.observability_stage : "cold";
   const primeReadiness = typeof signals?.prime_readiness === "number" ? signals.prime_readiness : 0;
+  const classicalLatency = typeof signals?.classical_latency === "number" ? signals.classical_latency : null;
+  const latencySource = typeof signals?.latency_source === "string" ? signals.latency_source : null;
+  const latencyProvider = typeof signals?.latency_provider === "string" ? signals.latency_provider : null;
+  const latencyOperation = typeof signals?.latency_operation === "string" ? signals.latency_operation : null;
 
   return (
     <div className="h-screen flex flex-col bg-[#050505] text-[#e0e0e0] font-sans selection:bg-blue-500/30 overflow-hidden relative">
@@ -702,7 +706,16 @@ export default function App() {
                    <div className="flex items-center gap-4 text-right">
                     <div className="flex flex-col">
                       <span className="text-[8px] font-mono text-white/30">Latency</span>
-                      <span className="text-xs font-mono text-blue-400">{signals?.classical_latency?.toFixed(1) || '0'}ms</span>
+                      <span className="text-xs font-mono text-blue-400">
+                        {classicalLatency !== null ? `${classicalLatency.toFixed(1)}ms` : "--"}
+                      </span>
+                      <span className="text-[8px] font-mono uppercase tracking-[0.2em] text-white/20">
+                        {latencySource === "provider"
+                          ? `${latencyProvider || "provider"} ${latencyOperation === "plan_compile" ? "compile" : latencyOperation === "artifact_compile" ? "artifact" : "request"}`
+                          : latencySource === "run"
+                            ? "run telemetry"
+                            : "awaiting sample"}
+                      </span>
                     </div>
                     <div className="h-8 w-px bg-white/5" />
                     <div className="flex flex-col">
@@ -907,9 +920,11 @@ export default function App() {
                               ? 'text-green-400'
                               : sig.state === 'primed'
                                 ? 'text-blue-300'
-                                : sig.state === 'degraded'
-                                  ? 'text-rose-400'
-                                  : 'text-white/35'
+                                : sig.state === 'executing'
+                                  ? 'text-purple-300'
+                                  : sig.state === 'degraded'
+                                    ? 'text-rose-400'
+                                    : 'text-white/35'
                           }`}>
                             {sig.state}
                           </span>
@@ -986,9 +1001,9 @@ export default function App() {
       </main>
 
       {selectedArtifactRun?.artifact && (
-        <div className="absolute inset-0 z-[75] bg-black/85 backdrop-blur-sm flex items-center justify-center p-6">
-          <div className="w-full max-w-6xl max-h-[90vh] overflow-hidden border border-white/10 bg-[#090909] shadow-2xl">
-            <div className="flex items-start justify-between gap-6 p-6 border-b border-white/10 bg-white/[0.02]">
+        <div className="absolute inset-0 z-[75] bg-black/85 backdrop-blur-sm overflow-y-auto custom-scrollbar p-6">
+          <div className="w-full max-w-6xl h-[90vh] mx-auto flex flex-col border border-white/10 bg-[#090909] shadow-2xl">
+            <div className="shrink-0 flex items-start justify-between gap-6 p-6 border-b border-white/10 bg-white/[0.02]">
               <div className="space-y-2">
                 <span className="text-[10px] uppercase tracking-[0.35em] text-purple-300/70 font-mono">Compiled Artifact</span>
                 <h3 className="font-serif italic text-3xl text-white/90">{selectedArtifactRun.artifact.title}</h3>
@@ -1013,8 +1028,9 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-12 max-h-[calc(90vh-88px)] overflow-hidden">
-              <div className="col-span-7 overflow-y-auto p-6 border-r border-white/10 space-y-6">
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+              <div className="grid grid-cols-12 gap-6 p-6">
+              <div className="col-span-7 space-y-6">
                 <ArtifactSection title="Original Intent">
                   <p className="text-sm text-white/80 leading-relaxed">{selectedArtifactRun.artifact.originalIntent}</p>
                 </ArtifactSection>
@@ -1109,7 +1125,7 @@ export default function App() {
                 </ArtifactSection>
               </div>
 
-              <div className="col-span-5 overflow-y-auto p-6 space-y-6">
+              <div className="col-span-5 space-y-6">
                 <ArtifactSection title="Node List">
                   <div className="space-y-3">
                     {selectedArtifactRun.artifact.nodeList.map((node, index) => (
@@ -1143,15 +1159,16 @@ export default function App() {
                   </pre>
                 </ArtifactSection>
               </div>
+              </div>
             </div>
           </div>
         </div>
       )}
 
       {selectedPlan && (
-        <div className="absolute inset-0 z-[70] bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
-          <div className="w-full max-w-5xl max-h-[88vh] overflow-hidden border border-white/10 bg-[#090909] shadow-2xl">
-            <div className="flex items-start justify-between gap-6 p-6 border-b border-white/10 bg-white/[0.02]">
+        <div className="absolute inset-0 z-[70] bg-black/80 backdrop-blur-sm overflow-y-auto custom-scrollbar p-6">
+          <div className="w-full max-w-5xl h-[88vh] mx-auto flex flex-col border border-white/10 bg-[#090909] shadow-2xl">
+            <div className="shrink-0 flex items-start justify-between gap-6 p-6 border-b border-white/10 bg-white/[0.02]">
               <div className="space-y-2">
                 <span className="text-[10px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Plan Archive</span>
                 <h3 className="font-serif italic text-3xl text-white/90">{selectedPlan.name}</h3>
@@ -1173,8 +1190,9 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-0 max-h-[calc(88vh-88px)] overflow-hidden">
-              <div className="p-6 overflow-y-auto border-r border-white/10 space-y-6">
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+              <div className="grid grid-cols-2 gap-0">
+              <div className="p-6 border-r border-white/10 space-y-6">
                 <div className="space-y-2">
                   <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Intent</span>
                   <p className="text-sm text-white/80 leading-relaxed">{selectedPlan.intent}</p>
@@ -1220,11 +1238,12 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="p-6 overflow-y-auto space-y-3">
+              <div className="p-6 space-y-3">
                 <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Raw Schema</span>
                 <pre className="text-xs text-white/70 bg-black/60 border border-white/10 p-4 overflow-auto whitespace-pre-wrap break-all">
                   {JSON.stringify(selectedPlan, null, 2)}
                 </pre>
+              </div>
               </div>
             </div>
           </div>

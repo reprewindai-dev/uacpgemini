@@ -168,16 +168,40 @@ interface RunArtifact {
 }
 
 type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
+type ModelOperation = "plan_compile" | "artifact_compile";
+
+interface LatencyMeasurement {
+  durationMs: number;
+  provider: ModelProvider;
+  operation: ModelOperation;
+  recordedAt: string;
+}
+
+interface ObservabilityTelemetry {
+  recentLatencies: LatencyMeasurement[];
+  lastMeasuredLatencyMs: number | null;
+  lastMeasuredProvider: ModelProvider | null;
+  lastMeasuredOperation: ModelOperation | null;
+  lastMeasuredAt: string | null;
+}
 
 interface AppState {
   plans: Plan[];
   runs: Run[];
   events: AppEvent[];
+  observabilityTelemetry: ObservabilityTelemetry;
 }
 
 let plans: Plan[] = [];
 let runs: Run[] = [];
 let events: AppEvent[] = [];
+let observabilityTelemetry: ObservabilityTelemetry = {
+  recentLatencies: [],
+  lastMeasuredLatencyMs: null,
+  lastMeasuredProvider: null,
+  lastMeasuredOperation: null,
+  lastMeasuredAt: null,
+};
 let ollamaProcess: ChildProcess | null = null;
 let ollamaBootstrapPromise: Promise<void> | null = null;
 let ollamaReady = false;
@@ -185,6 +209,10 @@ const DATA_FILE_PATH = process.env.DATA_FILE_PATH?.trim() || path.join(process.c
 
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
+}
+
+function clamp01(value: number) {
+  return Math.min(1, Math.max(0, value));
 }
 
 function ensureDataFileDirectory() {
@@ -201,6 +229,7 @@ function persistState() {
     plans,
     runs,
     events,
+    observabilityTelemetry,
   };
 
   writeFileSync(DATA_FILE_PATH, JSON.stringify(state, null, 2), "utf8");
@@ -227,11 +256,48 @@ function loadPersistedState() {
       };
     }) as Run[] : [];
     events = Array.isArray(parsed.events) ? parsed.events : [];
+    observabilityTelemetry = parsed.observabilityTelemetry && Array.isArray(parsed.observabilityTelemetry.recentLatencies)
+      ? {
+          recentLatencies: parsed.observabilityTelemetry.recentLatencies
+            .filter((entry): entry is LatencyMeasurement => (
+              typeof entry?.durationMs === "number" &&
+              typeof entry?.provider === "string" &&
+              typeof entry?.operation === "string" &&
+              typeof entry?.recordedAt === "string"
+            ))
+            .slice(0, 20),
+          lastMeasuredLatencyMs: typeof parsed.observabilityTelemetry.lastMeasuredLatencyMs === "number"
+            ? parsed.observabilityTelemetry.lastMeasuredLatencyMs
+            : null,
+          lastMeasuredProvider: typeof parsed.observabilityTelemetry.lastMeasuredProvider === "string"
+            ? parsed.observabilityTelemetry.lastMeasuredProvider as ModelProvider
+            : null,
+          lastMeasuredOperation: typeof parsed.observabilityTelemetry.lastMeasuredOperation === "string"
+            ? parsed.observabilityTelemetry.lastMeasuredOperation as ModelOperation
+            : null,
+          lastMeasuredAt: typeof parsed.observabilityTelemetry.lastMeasuredAt === "string"
+            ? parsed.observabilityTelemetry.lastMeasuredAt
+            : null,
+        }
+      : {
+          recentLatencies: [],
+          lastMeasuredLatencyMs: null,
+          lastMeasuredProvider: null,
+          lastMeasuredOperation: null,
+          lastMeasuredAt: null,
+        };
   } catch (error) {
     console.error("State load error:", error);
     plans = [];
     runs = [];
     events = [];
+    observabilityTelemetry = {
+      recentLatencies: [],
+      lastMeasuredLatencyMs: null,
+      lastMeasuredProvider: null,
+      lastMeasuredOperation: null,
+      lastMeasuredAt: null,
+    };
   }
 }
 
@@ -548,6 +614,25 @@ function getPrimaryProvider() {
   return getConfiguredProviders()[0] || "fallback";
 }
 
+function recordLatency(provider: ModelProvider, operation: ModelOperation, durationMs: number) {
+  const measurement: LatencyMeasurement = {
+    durationMs: Number(durationMs.toFixed(1)),
+    provider,
+    operation,
+    recordedAt: new Date().toISOString(),
+  };
+
+  observabilityTelemetry = {
+    recentLatencies: [measurement, ...observabilityTelemetry.recentLatencies].slice(0, 20),
+    lastMeasuredLatencyMs: measurement.durationMs,
+    lastMeasuredProvider: provider,
+    lastMeasuredOperation: operation,
+    lastMeasuredAt: measurement.recordedAt,
+  };
+
+  persistState();
+}
+
 function isProviderConfigured(provider: ModelProvider) {
   switch (provider) {
     case "groq":
@@ -565,12 +650,13 @@ function isProviderConfigured(provider: ModelProvider) {
   }
 }
 
-async function requestGroq(prompt: string, expectJson: boolean) {
+async function requestGroq(prompt: string, expectJson: boolean, operation: ModelOperation) {
   const groq = getGroqConfig();
   if (!groq) {
     throw new Error("Groq is not configured");
   }
 
+  const startedAt = Date.now();
   const response = await fetchWithTimeout(`${groq.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -595,15 +681,18 @@ async function requestGroq(prompt: string, expectJson: boolean) {
     throw new Error("Groq returned an empty response");
   }
 
+  recordLatency("groq", operation, Date.now() - startedAt);
+
   return { provider: "groq" as const, text: cleanModelText(text) };
 }
 
-async function requestHuggingFace(prompt: string, expectJson: boolean) {
+async function requestHuggingFace(prompt: string, expectJson: boolean, operation: ModelOperation) {
   const huggingFace = getHuggingFaceConfig();
   if (!huggingFace) {
     throw new Error("Hugging Face is not configured");
   }
 
+  const startedAt = Date.now();
   const response = await fetchWithTimeout(`${huggingFace.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
@@ -628,10 +717,12 @@ async function requestHuggingFace(prompt: string, expectJson: boolean) {
     throw new Error("Hugging Face returned an empty response");
   }
 
+  recordLatency("huggingface", operation, Date.now() - startedAt);
+
   return { provider: "huggingface" as const, text: cleanModelText(text) };
 }
 
-async function requestOllama(prompt: string, expectJson: boolean) {
+async function requestOllama(prompt: string, expectJson: boolean, operation: ModelOperation) {
   const ollama = getOllamaConfig();
   if (!ollama) {
     throw new Error("Ollama is not configured");
@@ -639,6 +730,7 @@ async function requestOllama(prompt: string, expectJson: boolean) {
 
   await ensureOllamaReady();
 
+  const startedAt = Date.now();
   const response = await fetchWithTimeout(`${normalizeBaseUrl(ollama.baseUrl)}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -660,16 +752,19 @@ async function requestOllama(prompt: string, expectJson: boolean) {
     throw new Error("Ollama returned an empty response");
   }
 
+  recordLatency("ollama", operation, Date.now() - startedAt);
+
   return { provider: "ollama" as const, text: cleanModelText(text) };
 }
 
-async function requestGemini(prompt: string, expectJson: boolean) {
+async function requestGemini(prompt: string, expectJson: boolean, operation: ModelOperation) {
   const gemini = getGeminiConfig();
   if (!gemini) {
     throw new Error("Gemini is not configured");
   }
 
   const ai = new GoogleGenAI({ apiKey: gemini.apiKey });
+  const startedAt = Date.now();
   const response = await withTimeout(() => ai.models.generateContent({
     model: gemini.model,
     contents: prompt,
@@ -681,10 +776,12 @@ async function requestGemini(prompt: string, expectJson: boolean) {
     throw new Error("Gemini returned an empty response");
   }
 
+  recordLatency("gemini", operation, Date.now() - startedAt);
+
   return { provider: "gemini" as const, text: cleanModelText(text) };
 }
 
-async function generateModelText(prompt: string, expectJson: boolean) {
+async function generateModelText(prompt: string, expectJson: boolean, operation: ModelOperation) {
   const failures: string[] = [];
 
   for (const provider of getProviderOrder()) {
@@ -695,13 +792,13 @@ async function generateModelText(prompt: string, expectJson: boolean) {
     try {
       switch (provider) {
         case "groq":
-          return await requestGroq(prompt, expectJson);
+          return await requestGroq(prompt, expectJson, operation);
         case "huggingface":
-          return await requestHuggingFace(prompt, expectJson);
+          return await requestHuggingFace(prompt, expectJson, operation);
         case "ollama":
-          return await requestOllama(prompt, expectJson);
+          return await requestOllama(prompt, expectJson, operation);
         case "gemini":
-          return await requestGemini(prompt, expectJson);
+          return await requestGemini(prompt, expectJson, operation);
         default:
           break;
       }
@@ -966,7 +1063,7 @@ async function compilePlanDraft(intent: string): Promise<{ plan: ReturnType<type
   const fallbackPlan = createFallbackPlanDraft(intent);
 
   try {
-    const result = await generateModelText(buildCompilePlanPrompt(intent), true);
+    const result = await generateModelText(buildCompilePlanPrompt(intent), true, "plan_compile");
     return {
       plan: normalizeCompiledPlan(parseJsonText(result.text), intent),
       provider: result.provider,
@@ -1105,7 +1202,7 @@ function normalizeArtifactResponse(data: any, plan: Plan, run: Run): RunArtifact
 
 async function generateRunArtifact(plan: Plan, run: Run): Promise<{ artifact: RunArtifact; provider: ModelProvider }> {
   try {
-    const result = await generateModelText(buildArtifactPrompt(plan, run), true);
+    const result = await generateModelText(buildArtifactPrompt(plan, run), true, "artifact_compile");
     return {
       artifact: normalizeArtifactResponse(parseJsonText(result.text), plan, run),
       provider: result.provider,
@@ -1307,7 +1404,6 @@ async function startServer() {
 
   app.get("/api/observability/signals", (req, res) => {
     const completedRuns = runs.filter((run) => run.status === "completed");
-    const activeRuns = runs.filter((run) => run.status === "pending" || run.status === "executing");
     const latestPlan = [...plans].sort((left, right) => (
       new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
     ))[0];
@@ -1330,32 +1426,29 @@ async function startServer() {
     const edgeCoverage = totalNodes <= 1
       ? (totalNodes === 1 ? 1 : 0)
       : Math.min(1, referenceEdges.length / (totalNodes - 1));
+    const nodeCoverage = totalNodes > 0 ? clamp01(totalNodes / 4) : 0;
     const providerReadiness = getConfiguredProviders().length > 0 ? 1 : 0.7;
     const researchReadiness = ssrnSignals.length > 0 ? 1 : 0.5;
     const persistenceReadiness = (plans.length > 0 || runs.length > 0 || existsSync(DATA_FILE_PATH)) ? 1 : 0.5;
     const planStructureReadiness = referencePlan && totalNodes > 0 ? 1 : 0;
+    const artifactCoverage = referenceRun?.artifact && totalNodes > 0
+      ? clamp01((referenceRun.artifact.phaseOutputs?.length || 0) / totalNodes)
+      : 0;
     const primeReadiness = referencePlan
-      ? (
-          planStructureReadiness +
-          policyAlignment +
-          edgeCoverage +
-          providerReadiness +
-          researchReadiness +
-          persistenceReadiness
-        ) / 6
+      ? clamp01(
+          (planStructureReadiness * 0.24) +
+          (policyAlignment * 0.24) +
+          (edgeCoverage * 0.16) +
+          (providerReadiness * 0.14) +
+          (researchReadiness * 0.12) +
+          (persistenceReadiness * 0.1)
+        )
       : 0;
-    const runDurations = completedRuns
-      .map((run) => {
-        if (!run.endTime) {
-          return 0;
-        }
-
-        return new Date(run.endTime).getTime() - new Date(run.startTime).getTime();
-      })
-      .filter((duration) => duration > 0);
-    const averageDurationMs = runDurations.length > 0
-      ? runDurations.reduce((sum, duration) => sum + duration, 0) / runDurations.length
-      : 0;
+    const latestCompletedRun = [...completedRuns].sort((left, right) => {
+      const leftTime = left.endTime ? new Date(left.endTime).getTime() : 0;
+      const rightTime = right.endTime ? new Date(right.endTime).getTime() : 0;
+      return rightTime - leftTime;
+    })[0];
     let observabilityStage: "cold" | "primed" | "executing" | "verified" | "degraded" = "cold";
 
     if (referenceRun?.status === "failed") {
@@ -1372,63 +1465,146 @@ async function startServer() {
     if (referenceRun?.status === "completed" && referenceRun.artifact) {
       completionSignal = 1;
     } else if (referenceRun?.status === "executing") {
-      completionSignal = Math.max(referenceRun.progress / 100, primeReadiness * 0.82);
+      completionSignal = clamp01(0.2 + ((referenceRun.progress / 100) * 0.8));
     } else if (referenceRun?.status === "pending") {
-      completionSignal = Math.max(0.55, primeReadiness * 0.85);
+      completionSignal = clamp01(
+        0.72 +
+        (nodeCoverage * 0.06) +
+        (edgeCoverage * 0.05) +
+        (providerReadiness * 0.04) +
+        (persistenceReadiness * 0.03)
+      );
     } else if (referenceRun?.status === "failed") {
-      completionSignal = Math.min(0.35, primeReadiness * 0.4);
+      completionSignal = clamp01(primeReadiness * 0.25);
     } else if (referencePlan) {
-      completionSignal = primeReadiness;
+      completionSignal = clamp01(
+        0.7 +
+        (nodeCoverage * 0.08) +
+        (edgeCoverage * 0.06) +
+        (providerReadiness * 0.04) +
+        (researchReadiness * 0.03) +
+        (persistenceReadiness * 0.02)
+      );
     }
 
     let pressure = 0;
     if (referenceRun?.status === "completed" && referenceRun.artifact) {
-      pressure = referenceRun.artifact.nextAction ? 1 : 0.92;
+      pressure = clamp01(
+        0.76 +
+        (artifactCoverage * 0.12) +
+        (referenceRun.artifact.nextAction ? 0.06 : 0) +
+        Math.min(0.04, totalNodes * 0.01)
+      );
     } else if (referenceRun && (referenceRun.status === "pending" || referenceRun.status === "executing")) {
-      pressure = Math.max(0.7, primeReadiness);
+      pressure = clamp01(
+        0.48 +
+        ((referenceRun.progress / 100) * 0.22) +
+        (edgeCoverage * 0.12) +
+        (providerReadiness * 0.08) +
+        (researchReadiness * 0.04) +
+        Math.min(0.06, totalNodes * 0.015)
+      );
     } else if (referenceRun?.status === "failed") {
       pressure = 0.25;
     } else if (referencePlan) {
-      pressure = primeReadiness;
+      pressure = clamp01(
+        0.34 +
+        (edgeCoverage * 0.16) +
+        (providerReadiness * 0.12) +
+        (researchReadiness * 0.07) +
+        (persistenceReadiness * 0.08) +
+        Math.min(0.1, totalNodes * 0.025)
+      );
     }
 
     let coherence = 0;
     if (referenceRun?.status === "completed" && referenceRun.artifact) {
       coherence = 100;
     } else if (referenceRun?.status === "executing") {
-      coherence = Math.min(100, Math.max(referenceRun.progress, primeReadiness * 100));
+      coherence = Math.min(
+        100,
+        62 +
+        ((referenceRun.progress / 100) * 24) +
+        (policyAlignment * 6) +
+        (edgeCoverage * 4) +
+        (providerReadiness * 4)
+      );
     } else if (referenceRun?.status === "pending") {
-      coherence = Math.max(60, primeReadiness * 100);
+      coherence = Math.min(
+        100,
+        74 +
+        (policyAlignment * 8) +
+        (edgeCoverage * 6) +
+        (researchReadiness * 4) +
+        (providerReadiness * 3)
+      );
     } else if (referenceRun?.status === "failed") {
-      coherence = Math.min(35, primeReadiness * 40);
+      coherence = Math.min(35, 18 + (policyAlignment * 10) + (edgeCoverage * 7));
     } else if (referencePlan) {
-      coherence = primeReadiness * 100;
+      coherence = Math.min(
+        100,
+        72 +
+        (policyAlignment * 8) +
+        (edgeCoverage * 7) +
+        (researchReadiness * 5) +
+        (providerReadiness * 4)
+      );
     }
 
-    const latency = averageDurationMs > 0
-      ? averageDurationMs / Math.max(1, Math.round(totalNodes / Math.max(1, plans.length)))
+    const latestRunLatency = latestCompletedRun?.endTime
+      ? (
+          new Date(latestCompletedRun.endTime).getTime() -
+          new Date(latestCompletedRun.startTime).getTime()
+        ) / Math.max(
+          1,
+          Array.isArray((latestCompletedRun.planSnapshot || referencePlan)?.graph?.nodes)
+            ? (latestCompletedRun.planSnapshot || referencePlan)?.graph?.nodes.length
+            : 1
+        )
+      : null;
+    const latestMeasuredTelemetryAt = observabilityTelemetry.lastMeasuredAt
+      ? new Date(observabilityTelemetry.lastMeasuredAt).getTime()
       : 0;
+    const latestRunLatencyAt = latestCompletedRun?.endTime
+      ? new Date(latestCompletedRun.endTime).getTime()
+      : 0;
+    const latency = latestMeasuredTelemetryAt >= latestRunLatencyAt
+      ? observabilityTelemetry.lastMeasuredLatencyMs
+      : latestRunLatency;
+    const latencySource = latestMeasuredTelemetryAt >= latestRunLatencyAt
+      ? "provider"
+      : latestRunLatency !== null
+        ? "run"
+        : null;
+    const stageBoost = observabilityStage === "verified"
+      ? 0.04
+      : observabilityStage === "executing"
+        ? 0.03
+        : observabilityStage === "primed"
+          ? 0.025
+          : observabilityStage === "degraded"
+            ? -0.1
+            : 0;
     const certaintyIndex = Math.min(0.9999, Math.max(
       0,
-      (policyAlignment * 0.35) +
-      (completionSignal * 0.3) +
-      (pressure * 0.15) +
-      ((coherence / 100) * 0.2)
+      (primeReadiness * 0.38) +
+      (policyAlignment * 0.22) +
+      (completionSignal * 0.16) +
+      (pressure * 0.12) +
+      ((coherence / 100) * 0.12) +
+      stageBoost
     ));
 
-    const signalState = observabilityStage === "primed"
-      ? "primed"
-      : observabilityStage === "verified"
-        ? "verified"
-        : observabilityStage === "degraded"
-          ? "degraded"
-          : "live";
+    const signalState = observabilityStage;
 
     res.json({
       observability_stage: observabilityStage,
       prime_readiness: Number(primeReadiness.toFixed(3)),
       quantum_coherence: coherence,
-      classical_latency: Number(latency.toFixed(1)),
+      classical_latency: typeof latency === "number" ? Number(latency.toFixed(1)) : null,
+      latency_source: latencySource,
+      latency_provider: latencySource === "provider" ? observabilityTelemetry.lastMeasuredProvider : null,
+      latency_operation: latencySource === "provider" ? observabilityTelemetry.lastMeasuredOperation : null,
       uacp_pressure: Number(pressure.toFixed(3)),
       gopher_policy_alignment: Number(policyAlignment.toFixed(3)),
       certainty_index: Number(certaintyIndex.toFixed(4)),
@@ -1449,7 +1625,7 @@ async function startServer() {
         {
           id: 'EXECUTION_PRESSURE',
           value: Number(pressure.toFixed(3)),
-          trend: pressure >= 0.9 ? 'rising' : pressure >= 0.6 ? 'stable' : 'falling',
+          trend: pressure >= 0.88 ? 'rising' : pressure >= 0.66 ? 'stable' : 'falling',
           state: signalState,
         }
       ]
