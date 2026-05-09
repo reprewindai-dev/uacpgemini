@@ -130,7 +130,22 @@ interface Plan {
   intent: string;
   revision: number;
   status: 'draft' | 'verified' | 'locked';
-  graph: any;
+  graph: {
+    nodes: Array<{
+      id: string;
+      type: "quantum" | "classical";
+      description: string;
+      policy_tag?: string;
+      policy_source?: "uacp_internal" | "model" | "fallback";
+      mapping_reason?: string;
+      confidence?: "high" | "medium" | "low";
+      entropy?: number;
+    }>;
+    edges: Array<{
+      from: string;
+      to: string;
+    }>;
+  };
   research?: ResearchDossier;
   createdAt: string;
 }
@@ -1149,6 +1164,7 @@ function buildCompilePlanPrompt(intent: string, research: ResearchDossier) {
     - Every node must reflect concrete deliverables from the intent.
     - If the intent contains explicit time windows such as "today", "next 72 hours", "day 7", or a 7-day operating plan, encode those phases directly in the node descriptions.
     - Policy tags must correspond to real governance or control checkpoints.
+    - Avoid generic tags like AC-10 unless the node description actually justifies them.
 
     Return only JSON with this shape:
     {
@@ -1256,6 +1272,93 @@ function normalizeEntropy(value: unknown, fallback: number) {
   return Math.min(1, Math.max(0, parsed));
 }
 
+function resolvePolicyMetadata(nodeDescription: string, suggestedTag?: string | null) {
+  const description = nodeDescription.toLowerCase();
+  const normalizedSuggestedTag = typeof suggestedTag === "string" ? suggestedTag.trim() : "";
+  const genericSuggestedTag = /^(AC-\d+|AC-GLOBAL|OPS-\d+|Q-\d+)$/i.test(normalizedSuggestedTag);
+
+  if (/archive|evidence|bundle|hash|persist|record/i.test(description)) {
+    return {
+      policy_tag: "UACP-ARCHIVE-INTEGRITY",
+      policy_source: "uacp_internal" as const,
+      mapping_reason: "Node concerns archive persistence, evidence capture, or artifact integrity.",
+      confidence: "high" as const,
+    };
+  }
+
+  if (/replay|reconstruct|judg(e)?ment|history/i.test(description)) {
+    return {
+      policy_tag: "UACP-REPLAY-BOUNDARY",
+      policy_source: "uacp_internal" as const,
+      mapping_reason: "Node concerns replayability, reconstruction, or audit boundary control.",
+      confidence: "high" as const,
+    };
+  }
+
+  if (/run|submit|commit|idempotent|dispatch|execute/i.test(description)) {
+    return {
+      policy_tag: "UACP-RUN-IDEMPOTENCY",
+      policy_source: "uacp_internal" as const,
+      mapping_reason: "Node concerns run initiation, execution commitment, or idempotent operational control.",
+      confidence: "high" as const,
+    };
+  }
+
+  if (/event|append-only|sequence|log|stream/i.test(description)) {
+    return {
+      policy_tag: "UACP-EVENT-SEQUENCING",
+      policy_source: "uacp_internal" as const,
+      mapping_reason: "Node concerns event sequencing, logging, or ordered control-plane state transitions.",
+      confidence: "high" as const,
+    };
+  }
+
+  if (/risk|policy|governance|compliance|review|constraint|control/i.test(description)) {
+    return {
+      policy_tag: "UACP-GOVERNANCE-REVIEW",
+      policy_source: "uacp_internal" as const,
+      mapping_reason: "Node concerns governance review, risk handling, or policy alignment enforcement.",
+      confidence: "high" as const,
+    };
+  }
+
+  if (/signal|observability|metric|monitor|pressure|latency/i.test(description)) {
+    return {
+      policy_tag: "UACP-SIGNAL-OBSERVABILITY",
+      policy_source: "uacp_internal" as const,
+      mapping_reason: "Node concerns observability signals, telemetry, or runtime monitoring.",
+      confidence: "high" as const,
+    };
+  }
+
+  if (/plan|scope|owner|phase|day|timeline|workflow|graph/i.test(description)) {
+    return {
+      policy_tag: "UACP-EXECUTION-PLANNING",
+      policy_source: "uacp_internal" as const,
+      mapping_reason: "Node concerns execution planning, scope definition, ownership, or phased workflow design.",
+      confidence: "medium" as const,
+    };
+  }
+
+  if (normalizedSuggestedTag && !genericSuggestedTag) {
+    return {
+      policy_tag: normalizedSuggestedTag,
+      policy_source: "model" as const,
+      mapping_reason: `Model supplied non-generic policy tag ${normalizedSuggestedTag}; retained because no stronger internal mapping matched.`,
+      confidence: "medium" as const,
+    };
+  }
+
+  return {
+    policy_tag: "UACP-GOVERNANCE-REVIEW",
+    policy_source: normalizedSuggestedTag ? "fallback" as const : "uacp_internal" as const,
+    mapping_reason: normalizedSuggestedTag
+      ? `Replaced generic model tag ${normalizedSuggestedTag} with the default UACP governance review policy because the description did not map cleanly to a narrower rule.`
+      : "Defaulted to governance review because the description did not match a narrower internal policy family.",
+    confidence: "low" as const,
+  };
+}
+
 function createPlanName(intent: string) {
   const words = intent
     .trim()
@@ -1276,34 +1379,30 @@ function createPlanName(intent: string) {
 function createFallbackPlanDraft(intent: string) {
   const directive = intent.trim().replace(/\s+/g, " ").slice(0, 96);
   const timelineIntent = /7[- ]?day|today|72 hours|day 7/i.test(intent);
-  const nodes = timelineIntent
+  const draftNodes = timelineIntent
     ? [
         {
           id: "today-scope",
           type: "classical" as const,
           description: `Define today's execution scope for: ${directive}`,
-          policy_tag: "AC-10",
           entropy: 0.08,
         },
         {
           id: "72h-owners",
           type: "classical" as const,
           description: "Assign owners, evidence requirements, and operating checkpoints for the next 72 hours.",
-          policy_tag: "OPS-14",
           entropy: 0.14,
         },
         {
           id: "day7-plan",
           type: "quantum" as const,
           description: "Assemble the day-7 operating plan, risks, and command-center review package.",
-          policy_tag: "Q-17",
           entropy: 0.27,
         },
         {
           id: "archive-control",
           type: "classical" as const,
           description: "Archive the evidence trail and define the live control-plane signals required for execution.",
-          policy_tag: "AC-GLOBAL",
           entropy: 0.06,
         },
       ]
@@ -1312,31 +1411,31 @@ function createFallbackPlanDraft(intent: string) {
           id: "intent-scope",
           type: "classical" as const,
           description: `Interpret directive and define execution scope: ${directive}`,
-          policy_tag: "AC-10",
           entropy: 0.08,
         },
         {
           id: "execution-design",
           type: "quantum" as const,
           description: "Model candidate execution paths and isolate the highest-confidence branch.",
-          policy_tag: "Q-17",
           entropy: 0.41,
         },
         {
           id: "policy-review",
           type: "classical" as const,
           description: "Validate policy alignment, safety controls, and execution preconditions.",
-          policy_tag: "AC-GLOBAL",
           entropy: 0.11,
         },
         {
           id: "run-contract",
           type: "classical" as const,
           description: "Commit the approved sequence to the control plane and persist the run contract.",
-          policy_tag: "OPS-22",
           entropy: 0.05,
         },
       ];
+  const nodes = draftNodes.map((node) => ({
+    ...node,
+    ...resolvePolicyMetadata(node.description),
+  }));
 
   return {
     name: createPlanName(intent),
@@ -1364,7 +1463,7 @@ function normalizeCompiledPlan(planData: any, intent: string) {
         id: typeof node?.id === "string" && node.id.trim() ? node.id.trim() : `node-${index + 1}`,
         type: normalizeNodeType(node?.type),
         description,
-        policy_tag: typeof node?.policy_tag === "string" && node.policy_tag.trim() ? node.policy_tag.trim() : `AC-${10 + index}`,
+        ...resolvePolicyMetadata(description, typeof node?.policy_tag === "string" ? node.policy_tag : ""),
         entropy: normalizeEntropy(node?.entropy, 0.18 + index * 0.09),
       };
     })

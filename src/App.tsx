@@ -45,6 +45,9 @@ interface Plan {
       type: 'quantum' | 'classical';
       description: string;
       policy_tag?: string;
+      policy_source?: string;
+      mapping_reason?: string;
+      confidence?: string;
       entropy?: number;
     }>;
     edges: Array<{ from: string; to: string }>;
@@ -1183,6 +1186,12 @@ export default function App() {
                         <div className="mt-3 text-[10px] font-mono uppercase tracking-[0.2em] text-white/35">
                           Policy: {node.policy_tag || "AC-GLOBAL"} | Entropy: {node.entropy ?? 0}
                         </div>
+                        <div className="mt-2 text-[10px] font-mono uppercase tracking-[0.2em] text-white/30">
+                          Source: {node.policy_source || "uacp_internal"} | Confidence: {node.confidence || "medium"}
+                        </div>
+                        {node.mapping_reason && (
+                          <p className="mt-2 text-xs text-white/55 leading-relaxed">{node.mapping_reason}</p>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1306,6 +1315,13 @@ export default function App() {
                         <span>Policy: {node.policy_tag || "AC-GLOBAL"}</span>
                         <span>Entropy: {node.entropy ?? 0}</span>
                       </div>
+                      <div className="mt-2 flex gap-6 text-[10px] font-mono uppercase tracking-[0.2em] text-white/30">
+                        <span>Source: {node.policy_source || "uacp_internal"}</span>
+                        <span>Confidence: {node.confidence || "medium"}</span>
+                      </div>
+                      {node.mapping_reason && (
+                        <p className="mt-3 text-xs text-white/55 leading-relaxed">{node.mapping_reason}</p>
+                      )}
                     </div>
                   ))}
                 </div>
