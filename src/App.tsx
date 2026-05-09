@@ -142,6 +142,21 @@ interface BootstrapPayload {
   researchFeedSource: string;
 }
 
+interface ReplayRecord {
+  replayId: string;
+  planId: string;
+  runId: string;
+  archiveRecordId: string;
+  generatedAt: string;
+  claimLevel: string;
+  checkpoints: Array<{
+    stage: "plan" | "run" | "event" | "archive" | "replay";
+    referenceId: string;
+    timestamp: string;
+    summary: string;
+  }>;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'intent' | 'execution' | 'ops'>('intent');
   const [intent, setIntent] = useState("");
@@ -150,6 +165,7 @@ export default function App() {
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
   const [selectedArtifactRun, setSelectedArtifactRun] = useState<Run | null>(null);
+  const [selectedReplay, setSelectedReplay] = useState<ReplayRecord | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [events, setEvents] = useState<any[]>([]);
@@ -242,6 +258,18 @@ export default function App() {
       socketRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedArtifactRun?.artifact) {
+      setSelectedReplay(null);
+      return;
+    }
+
+    fetch(`/api/runs/${selectedArtifactRun.id}/replay`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((payload) => setSelectedReplay(payload))
+      .catch(() => setSelectedReplay(null));
+  }, [selectedArtifactRun]);
 
   const handleCreatePlan = async () => {
     const trimmedIntent = intent.trim();
@@ -1170,6 +1198,28 @@ export default function App() {
                       <p key={`${entry}-${index}`}>{entry}</p>
                     ))}
                   </div>
+                </ArtifactSection>
+
+                <ArtifactSection title="Replay Chain">
+                  {selectedReplay ? (
+                    <div className="space-y-3">
+                      <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/35">
+                        Replay ID: {selectedReplay.replayId} | Claim Level: {selectedReplay.claimLevel}
+                      </div>
+                      {selectedReplay.checkpoints.map((checkpoint, index) => (
+                        <div key={`${checkpoint.referenceId}-${index}`} className="border border-white/10 p-4 bg-white/[0.02]">
+                          <div className="flex items-center justify-between gap-4 text-[10px] font-mono uppercase tracking-[0.25em]">
+                            <span className="text-blue-300/80">{checkpoint.stage}</span>
+                            <span className="text-white/35">{checkpoint.referenceId}</span>
+                          </div>
+                          <div className="mt-2 text-[10px] font-mono text-white/35">{new Date(checkpoint.timestamp).toLocaleString()}</div>
+                          <p className="mt-3 text-sm text-white/75 leading-relaxed">{checkpoint.summary}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-white/55 leading-relaxed">Replay record unavailable.</p>
+                  )}
                 </ArtifactSection>
               </div>
 

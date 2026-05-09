@@ -226,6 +226,21 @@ interface PersistedArchiveRecord {
   entries: string[];
 }
 
+interface ReplayRecord {
+  replayId: string;
+  planId: string;
+  runId: string;
+  archiveRecordId: string;
+  generatedAt: string;
+  claimLevel: RunArtifact["statusModel"]["claim_level"];
+  checkpoints: Array<{
+    stage: "plan" | "run" | "event" | "archive" | "replay";
+    referenceId: string;
+    timestamp: string;
+    summary: string;
+  }>;
+}
+
 type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
 type ModelOperation = "plan_compile" | "artifact_compile";
 
@@ -1826,6 +1841,55 @@ function validateArtifactEvidence(plan: Plan, artifact: RunArtifact) {
   return null;
 }
 
+function buildReplayRecord(run: Run, plan: Plan, artifact: RunArtifact): ReplayRecord {
+  const relatedEvents = events
+    .filter((event) => event.metadata?.runId === run.id || event.metadata?.planId === plan.id)
+    .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime());
+
+  const checkpoints: ReplayRecord["checkpoints"] = [
+    {
+      stage: "plan",
+      referenceId: plan.id,
+      timestamp: plan.createdAt,
+      summary: `Plan ${plan.name} created with status ${plan.status} and ${plan.graph.nodes.length} node(s).`,
+    },
+    {
+      stage: "run",
+      referenceId: run.id,
+      timestamp: run.startTime,
+      summary: `Run entered ${run.status} with active phase "${run.currentStep}".`,
+    },
+    ...relatedEvents.map((event) => ({
+      stage: "event" as const,
+      referenceId: event.id,
+      timestamp: event.timestamp,
+      summary: `${event.type}: ${event.message}`,
+    })),
+    {
+      stage: "archive",
+      referenceId: artifact.archiveRecord.recordId,
+      timestamp: artifact.generatedAt,
+      summary: artifact.archiveRecord.summary,
+    },
+    {
+      stage: "replay",
+      referenceId: `replay-${run.id}`,
+      timestamp: new Date().toISOString(),
+      summary: `Replay reconstructed from plan ${plan.id}, run ${run.id}, ${relatedEvents.length} event(s), and archive record ${artifact.archiveRecord.recordId}.`,
+    },
+  ];
+
+  return {
+    replayId: `replay-${run.id}`,
+    planId: plan.id,
+    runId: run.id,
+    archiveRecordId: artifact.archiveRecord.recordId,
+    generatedAt: new Date().toISOString(),
+    claimLevel: artifact.statusModel.claim_level,
+    checkpoints,
+  };
+}
+
 // --- WebSocket Support ---
 let clients: Set<WebSocket> = new Set();
 function broadcast(data: any) {
@@ -1976,6 +2040,24 @@ async function startServer() {
     }
 
     res.json(run.artifact);
+  });
+
+  app.get("/api/runs/:runId/replay", (req, res) => {
+    const run = runs.find((entry) => entry.id === req.params.runId);
+    if (!run) {
+      return res.status(404).json({ error: "Run not found" });
+    }
+
+    const plan = run.planSnapshot || plans.find((entry) => entry.id === run.planId);
+    if (!plan) {
+      return res.status(404).json({ error: "Plan snapshot not found" });
+    }
+
+    if (!run.artifact) {
+      return res.status(404).json({ error: "Artifact not ready" });
+    }
+
+    res.json(buildReplayRecord(run, plan, run.artifact));
   });
 
   app.post("/api/runs", (req, res) => {
