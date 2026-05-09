@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { spawn, type ChildProcess } from "child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
@@ -19,16 +20,38 @@ interface SSRNSignal {
 
 const parser = new XMLParser();
 
-let ssrnSignals: SSRNSignal[] = [
-  { id: '#2401.0921', title: 'Quantum Probabilistic Modeling', strength: 98.4, timestamp: new Date().toISOString(), category: 'Quantum' },
-  { id: '#2312.4402', title: 'Neural Determinism in LLMs', strength: 94.1, timestamp: new Date().toISOString(), category: 'Deterministic' },
-  { id: '#2402.1155', title: 'Heuristic Agents & Capital', strength: 89.2, timestamp: new Date().toISOString(), category: 'Economics' }
-];
+let ssrnSignals: SSRNSignal[] = [];
 
-let marketConvergence = [
-  { label: "Deterministic Alpha", value: "+14.2%", description: "Hedge-adjusted probabilistic yield" },
-  { label: "Market Heuristics", value: "+8.7%", description: "Sentiment aggregation" }
-];
+let marketConvergence: Array<{ label: string; value: string; description: string }> = [];
+
+function computeSignalStrength(entry: any) {
+  const title = typeof entry?.title === "string" ? entry.title.toLowerCase() : "";
+  const summary = typeof entry?.summary === "string" ? entry.summary.toLowerCase() : "";
+  const corpus = `${title} ${summary}`;
+  const keywords = [
+    "quantum",
+    "llm",
+    "deterministic",
+    "agent",
+    "optimization",
+    "risk",
+    "policy",
+    "control",
+    "governance",
+    "evaluation",
+  ];
+  const keywordMatches = keywords.reduce((count, keyword) => (
+    corpus.includes(keyword) ? count + 1 : count
+  ), 0);
+  const updatedAt = typeof entry?.updated === "string" ? new Date(entry.updated).getTime() : Date.now();
+  const ageHours = Math.max(0, (Date.now() - updatedAt) / 36e5);
+  const recencyScore = Math.max(0, 24 - Math.min(24, ageHours / 6));
+  const category = String(entry?.category?.attr_term || "");
+  const categoryScore = /^cs\./i.test(category) ? 6 : 0;
+  const total = 55 + (keywordMatches * 4) + recencyScore + categoryScore;
+
+  return Number(Math.min(99.9, Math.max(50, total)).toFixed(1));
+}
 
 async function updateRealSignals() {
   try {
@@ -42,7 +65,7 @@ async function updateRealSignals() {
       ssrnSignals = entries.map((entry: any) => ({
         id: entry.id?.split('/').pop() || '#UKNOWN',
         title: entry.title?.replace(/\n/g, ' ').trim() || 'Untitled Paper',
-        strength: 85 + Math.random() * 14,
+        strength: computeSignalStrength(entry),
         timestamp: entry.updated || new Date().toISOString(),
         category: (entry.category?.attr_term || 'Research').replace('cs.', '')
       }));
@@ -76,7 +99,7 @@ updateRealSignals();
 // Refresh every 5 minutes
 setInterval(updateRealSignals, 300000);
 
-// --- Types & Storage (Mock DB) ---
+// --- Types & Storage (In-Memory State) ---
 interface Plan {
   id: string;
   name: string;
@@ -90,10 +113,12 @@ interface Plan {
 interface Run {
   id: string;
   planId: string;
+  planSnapshot?: Plan;
   status: 'pending' | 'executing' | 'completed' | 'failed';
   currentStep: string;
   progress: number;
   output?: any;
+  artifact?: RunArtifact;
   startTime: string;
   endTime?: string;
 }
@@ -106,7 +131,49 @@ interface AppEvent {
   metadata?: any;
 }
 
+interface RunArtifact {
+  artifactId: string;
+  title: string;
+  generatedAt: string;
+  planId: string;
+  runId: string;
+  originalIntent: string;
+  generatedGraph: Plan["graph"];
+  nodeList: Plan["graph"]["nodes"];
+  policyTags: string[];
+  runContract: {
+    objective: string;
+    acceptanceCriteria: string[];
+    constraints: string[];
+    successMetric: string;
+  };
+  phaseOutputs: Array<{
+    phase: string;
+    nodeId: string;
+    output: string;
+  }>;
+  today: string[];
+  next72Hours: string[];
+  day7: string[];
+  risks: string[];
+  archives: string[];
+  commandCenterSignals: string[];
+  finalReport: string;
+  archiveRecord: {
+    recordId: string;
+    summary: string;
+    entries: string[];
+  };
+  nextAction: string;
+}
+
 type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
+
+interface AppState {
+  plans: Plan[];
+  runs: Run[];
+  events: AppEvent[];
+}
 
 let plans: Plan[] = [];
 let runs: Run[] = [];
@@ -114,6 +181,61 @@ let events: AppEvent[] = [];
 let ollamaProcess: ChildProcess | null = null;
 let ollamaBootstrapPromise: Promise<void> | null = null;
 let ollamaReady = false;
+const DATA_FILE_PATH = process.env.DATA_FILE_PATH?.trim() || path.join(process.cwd(), "data", "uacp-state.json");
+
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function ensureDataFileDirectory() {
+  const dir = path.dirname(DATA_FILE_PATH);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+}
+
+function persistState() {
+  ensureDataFileDirectory();
+
+  const state: AppState = {
+    plans,
+    runs,
+    events,
+  };
+
+  writeFileSync(DATA_FILE_PATH, JSON.stringify(state, null, 2), "utf8");
+}
+
+function loadPersistedState() {
+  try {
+    if (!existsSync(DATA_FILE_PATH)) {
+      return;
+    }
+
+    const raw = readFileSync(DATA_FILE_PATH, "utf8");
+    if (!raw.trim()) {
+      return;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<AppState>;
+    plans = Array.isArray(parsed.plans) ? parsed.plans : [];
+    runs = Array.isArray(parsed.runs) ? parsed.runs.map((run) => {
+      const matchedPlan = plans.find((plan) => plan.id === run.planId);
+      return {
+        ...run,
+        planSnapshot: run.planSnapshot || (matchedPlan ? deepClone(matchedPlan) : undefined),
+      };
+    }) as Run[] : [];
+    events = Array.isArray(parsed.events) ? parsed.events : [];
+  } catch (error) {
+    console.error("State load error:", error);
+    plans = [];
+    runs = [];
+    events = [];
+  }
+}
+
+loadPersistedState();
 
 function getGroqConfig() {
   const apiKey = process.env.GROQ_API_KEY?.trim();
@@ -357,6 +479,29 @@ function getProviderOrder(): ModelProvider[] {
   ])];
 }
 
+function getConfiguredProviders() {
+  return getProviderOrder().filter(isProviderConfigured);
+}
+
+function formatProviderLabel(provider: ModelProvider) {
+  switch (provider) {
+    case "groq":
+      return "Groq";
+    case "huggingface":
+      return "Hugging Face";
+    case "ollama":
+      return "Ollama";
+    case "gemini":
+      return "Gemini";
+    default:
+      return "Deterministic fallback";
+  }
+}
+
+function getPrimaryProvider() {
+  return getConfiguredProviders()[0] || "fallback";
+}
+
 function isProviderConfigured(provider: ModelProvider) {
   switch (provider) {
     case "groq":
@@ -535,6 +680,12 @@ function buildCompilePlanPrompt(intent: string) {
 
     User intent: "${intent}"
 
+    Requirements:
+    - Decode the actual task deeply. Do not return generic placeholder nodes.
+    - Every node must reflect concrete deliverables from the intent.
+    - If the intent contains explicit time windows such as "today", "next 72 hours", "day 7", or a 7-day operating plan, encode those phases directly in the node descriptions.
+    - Policy tags must correspond to real governance or control checkpoints.
+
     Return only JSON with this shape:
     {
       "name": "Concise identifier",
@@ -554,14 +705,60 @@ function buildCompilePlanPrompt(intent: string) {
   `;
 }
 
-function buildRunSummaryPrompt(plan: Plan | undefined) {
+function buildArtifactPrompt(plan: Plan, run: Run) {
   return `
-    You are the Quantum UACP Intelligence Agent.
-    The user intent was: "${plan?.intent || "Unknown"}"
-    The current research signals include: ${ssrnSignals.map((signal) => signal.title).join(", ")}
-    The current market state is: ${marketConvergence.map((entry) => `${entry.label}: ${entry.value}`).join(", ")}
+    You are the Quantum UACP Artifact Compiler.
+    Convert the completed run into a concrete artifact that exposes exactly what was produced.
 
-    Provide a concise final outcome report in exactly 2 sentences.
+    Plan ID: ${plan.id}
+    Run ID: ${run.id}
+    Original intent: "${plan.intent}"
+    Plan graph: ${JSON.stringify(plan.graph)}
+    Current research signals: ${ssrnSignals.map((signal) => signal.title).join(", ")}
+    Current market state: ${marketConvergence.map((entry) => `${entry.label}: ${entry.value}`).join(", ")}
+
+    Requirements:
+    - Return only JSON.
+    - The artifact must depend on the actual prompt.
+    - If the intent asks for a 7-day operating plan, explicitly fill:
+      - today
+      - next72Hours
+      - day7
+      - risks
+      - archives
+      - commandCenterSignals
+    - Do not use generic filler like "execution finalized" as the main content.
+    - Phase outputs must tie back to the node list.
+
+    Return JSON with this shape:
+    {
+      "title": "Compiled Artifact title",
+      "runContract": {
+        "objective": "string",
+        "acceptanceCriteria": ["string"],
+        "constraints": ["string"],
+        "successMetric": "string"
+      },
+      "phaseOutputs": [
+        {
+          "phase": "Today|72 Hours|Day 7|Archive|Control",
+          "nodeId": "string",
+          "output": "string"
+        }
+      ],
+      "today": ["string"],
+      "next72Hours": ["string"],
+      "day7": ["string"],
+      "risks": ["string"],
+      "archives": ["string"],
+      "commandCenterSignals": ["string"],
+      "finalReport": "string",
+      "archiveRecord": {
+        "summary": "string",
+        "entries": ["string"]
+      },
+      "nextAction": "string"
+    }
   `;
 }
 
@@ -599,36 +796,68 @@ function createPlanName(intent: string) {
 
 function createFallbackPlanDraft(intent: string) {
   const directive = intent.trim().replace(/\s+/g, " ").slice(0, 96);
-  const nodes = [
-    {
-      id: "ingest",
-      type: "classical" as const,
-      description: `Interpret directive: ${directive}`,
-      policy_tag: "AC-10",
-      entropy: 0.08,
-    },
-    {
-      id: "model",
-      type: "quantum" as const,
-      description: "Model candidate execution paths and isolate the highest-confidence branch.",
-      policy_tag: "Q-17",
-      entropy: 0.41,
-    },
-    {
-      id: "validate",
-      type: "classical" as const,
-      description: "Validate policy alignment, safety controls, and execution preconditions.",
-      policy_tag: "AC-GLOBAL",
-      entropy: 0.11,
-    },
-    {
-      id: "commit",
-      type: "classical" as const,
-      description: "Commit the approved sequence to the control plane and persist the run contract.",
-      policy_tag: "OPS-22",
-      entropy: 0.05,
-    },
-  ];
+  const timelineIntent = /7[- ]?day|today|72 hours|day 7/i.test(intent);
+  const nodes = timelineIntent
+    ? [
+        {
+          id: "today-scope",
+          type: "classical" as const,
+          description: `Define today's execution scope for: ${directive}`,
+          policy_tag: "AC-10",
+          entropy: 0.08,
+        },
+        {
+          id: "72h-owners",
+          type: "classical" as const,
+          description: "Assign owners, evidence requirements, and operating checkpoints for the next 72 hours.",
+          policy_tag: "OPS-14",
+          entropy: 0.14,
+        },
+        {
+          id: "day7-plan",
+          type: "quantum" as const,
+          description: "Assemble the day-7 operating plan, risks, and command-center review package.",
+          policy_tag: "Q-17",
+          entropy: 0.27,
+        },
+        {
+          id: "archive-control",
+          type: "classical" as const,
+          description: "Archive the evidence trail and define the live control-plane signals required for execution.",
+          policy_tag: "AC-GLOBAL",
+          entropy: 0.06,
+        },
+      ]
+    : [
+        {
+          id: "intent-scope",
+          type: "classical" as const,
+          description: `Interpret directive and define execution scope: ${directive}`,
+          policy_tag: "AC-10",
+          entropy: 0.08,
+        },
+        {
+          id: "execution-design",
+          type: "quantum" as const,
+          description: "Model candidate execution paths and isolate the highest-confidence branch.",
+          policy_tag: "Q-17",
+          entropy: 0.41,
+        },
+        {
+          id: "policy-review",
+          type: "classical" as const,
+          description: "Validate policy alignment, safety controls, and execution preconditions.",
+          policy_tag: "AC-GLOBAL",
+          entropy: 0.11,
+        },
+        {
+          id: "run-contract",
+          type: "classical" as const,
+          description: "Commit the approved sequence to the control plane and persist the run contract.",
+          policy_tag: "OPS-22",
+          entropy: 0.05,
+        },
+      ];
 
   return {
     name: createPlanName(intent),
@@ -705,17 +934,140 @@ async function compilePlanDraft(intent: string): Promise<{ plan: ReturnType<type
   }
 }
 
-async function generateRunSummary(plan: Plan | undefined): Promise<{ text: string; provider: ModelProvider }> {
+function createFallbackArtifact(plan: Plan, run: Run): RunArtifact {
+  const nodes = Array.isArray(plan.graph?.nodes) ? plan.graph.nodes : [];
+  const nodeOutputs = nodes.map((node, index) => ({
+    phase: index === 0 ? "Today" : index === 1 ? "72 Hours" : index === 2 ? "Day 7" : `Phase ${index + 1}`,
+    nodeId: node.id,
+    output: node.description,
+  }));
+  const policyTags = [...new Set(nodes.map((node) => node.policy_tag).filter(Boolean))] as string[];
+  const intent = plan.intent.trim();
+  const baseToday = [
+    `Lock scope and ownership for: ${intent}`,
+    `Translate node ${nodes[0]?.id || "phase-1"} into an executable deliverable with acceptance criteria.`,
+  ];
+  const base72Hours = [
+    `Drive node outputs through governance review and assign owners for ${nodes.slice(0, 2).map((node) => node.id).join(", ") || "the first execution phases"}.`,
+    `Write archive entries for decisions, evidence, and blocked dependencies.`,
+  ];
+  const baseDay7 = [
+    `Deliver the compiled operating plan to the command center with evidence attached for ${plan.name}.`,
+    `Review unresolved constraints and approve the next execution cycle.`,
+  ];
+
+  return {
+    artifactId: `artifact-${run.id}`,
+    title: "Deterministic Outcome Artifact",
+    generatedAt: new Date().toISOString(),
+    planId: plan.id,
+    runId: run.id,
+    originalIntent: intent,
+    generatedGraph: deepClone(plan.graph),
+    nodeList: deepClone(nodes),
+    policyTags,
+    runContract: {
+      objective: intent,
+      acceptanceCriteria: [
+        `Every node in ${plan.id} has an owner, output, and policy checkpoint.`,
+        `The compiled artifact contains a day-structured execution record.`,
+      ],
+      constraints: [
+        "No generic filler output is allowed.",
+        "Archive every decision that changes execution order or ownership.",
+      ],
+      successMetric: `Run ${run.id} completes with a usable artifact and explicit next action.`,
+    },
+    phaseOutputs: nodeOutputs,
+    today: baseToday,
+    next72Hours: base72Hours,
+    day7: baseDay7,
+    risks: [
+      "Ownership drift across pillars can break the execution schedule.",
+      "Missing archive evidence will weaken operational auditability.",
+    ],
+    archives: [
+      `Archive the compiled graph for ${plan.id}.`,
+      `Store phase outputs, owner decisions, and blockers for ${run.id}.`,
+    ],
+    commandCenterSignals: [
+      "Owner assignment completion",
+      "Policy checkpoint coverage",
+      "Blocked dependency count",
+      "Archive evidence freshness",
+    ],
+    finalReport: `Run ${run.id} completed with ${nodes.length} artifact phases derived from the original intent: ${intent}`,
+    archiveRecord: {
+      recordId: `archive-${run.id}`,
+      summary: `Artifact bundle for ${plan.id}`,
+      entries: [
+        `Intent captured: ${intent}`,
+        `Node outputs recorded: ${nodes.map((node) => node.id).join(", ") || "none"}`,
+      ],
+    },
+    nextAction: "Open the compiled artifact, review the phase outputs, and approve the next execution cycle.",
+  };
+}
+
+function normalizeArtifactResponse(data: any, plan: Plan, run: Run): RunArtifact {
+  const fallback = createFallbackArtifact(plan, run);
+
+  return {
+    artifactId: `artifact-${run.id}`,
+    title: typeof data?.title === "string" && data.title.trim() ? data.title.trim() : fallback.title,
+    generatedAt: new Date().toISOString(),
+    planId: plan.id,
+    runId: run.id,
+    originalIntent: plan.intent,
+    generatedGraph: deepClone(plan.graph),
+    nodeList: deepClone(plan.graph?.nodes || []),
+    policyTags: Array.from(new Set<string>(
+      (plan.graph?.nodes || []).flatMap((node: any) => (
+        typeof node?.policy_tag === "string" && node.policy_tag.trim().length > 0
+          ? [node.policy_tag.trim()]
+          : []
+      ))
+    )),
+    runContract: {
+      objective: typeof data?.runContract?.objective === "string" && data.runContract.objective.trim() ? data.runContract.objective.trim() : fallback.runContract.objective,
+      acceptanceCriteria: Array.isArray(data?.runContract?.acceptanceCriteria) && data.runContract.acceptanceCriteria.length > 0 ? data.runContract.acceptanceCriteria.map(String) : fallback.runContract.acceptanceCriteria,
+      constraints: Array.isArray(data?.runContract?.constraints) && data.runContract.constraints.length > 0 ? data.runContract.constraints.map(String) : fallback.runContract.constraints,
+      successMetric: typeof data?.runContract?.successMetric === "string" && data.runContract.successMetric.trim() ? data.runContract.successMetric.trim() : fallback.runContract.successMetric,
+    },
+    phaseOutputs: Array.isArray(data?.phaseOutputs) && data.phaseOutputs.length > 0
+      ? data.phaseOutputs.map((entry: any, index: number) => ({
+          phase: typeof entry?.phase === "string" && entry.phase.trim() ? entry.phase.trim() : fallback.phaseOutputs[index]?.phase || `Phase ${index + 1}`,
+          nodeId: typeof entry?.nodeId === "string" && entry.nodeId.trim() ? entry.nodeId.trim() : fallback.phaseOutputs[index]?.nodeId || `node-${index + 1}`,
+          output: typeof entry?.output === "string" && entry.output.trim() ? entry.output.trim() : fallback.phaseOutputs[index]?.output || "",
+        }))
+      : fallback.phaseOutputs,
+    today: Array.isArray(data?.today) && data.today.length > 0 ? data.today.map(String) : fallback.today,
+    next72Hours: Array.isArray(data?.next72Hours) && data.next72Hours.length > 0 ? data.next72Hours.map(String) : fallback.next72Hours,
+    day7: Array.isArray(data?.day7) && data.day7.length > 0 ? data.day7.map(String) : fallback.day7,
+    risks: Array.isArray(data?.risks) && data.risks.length > 0 ? data.risks.map(String) : fallback.risks,
+    archives: Array.isArray(data?.archives) && data.archives.length > 0 ? data.archives.map(String) : fallback.archives,
+    commandCenterSignals: Array.isArray(data?.commandCenterSignals) && data.commandCenterSignals.length > 0 ? data.commandCenterSignals.map(String) : fallback.commandCenterSignals,
+    finalReport: typeof data?.finalReport === "string" && data.finalReport.trim() ? data.finalReport.trim() : fallback.finalReport,
+    archiveRecord: {
+      recordId: `archive-${run.id}`,
+      summary: typeof data?.archiveRecord?.summary === "string" && data.archiveRecord.summary.trim() ? data.archiveRecord.summary.trim() : fallback.archiveRecord.summary,
+      entries: Array.isArray(data?.archiveRecord?.entries) && data.archiveRecord.entries.length > 0 ? data.archiveRecord.entries.map(String) : fallback.archiveRecord.entries,
+    },
+    nextAction: typeof data?.nextAction === "string" && data.nextAction.trim() ? data.nextAction.trim() : fallback.nextAction,
+  };
+}
+
+async function generateRunArtifact(plan: Plan, run: Run): Promise<{ artifact: RunArtifact; provider: ModelProvider }> {
   try {
-    const result = await generateModelText(buildRunSummaryPrompt(plan), false);
+    const result = await generateModelText(buildArtifactPrompt(plan, run), true);
     return {
-      text: result.text,
+      artifact: normalizeArtifactResponse(parseJsonText(result.text), plan, run),
       provider: result.provider,
     };
   } catch (error) {
-    console.error("Run summary error:", error);
+    console.error("Run artifact error:", error);
     return {
-      text: "Execution finalized. Deterministic outcomes verified across all research nodes.",
+      artifact: createFallbackArtifact(plan, run),
       provider: "fallback",
     };
   }
@@ -733,6 +1085,18 @@ function createPlanRecord(name: string, intent: string, graph: any): Plan {
   };
 }
 
+function createRunRecord(plan: Plan): Run {
+  return {
+    id: `run-${Math.random().toString(36).substring(2, 9)}`,
+    planId: plan.id,
+    planSnapshot: deepClone(plan),
+    status: "pending",
+    currentStep: "Initializing Gateway",
+    progress: 0,
+    startTime: new Date().toISOString(),
+  };
+}
+
 function addEvent(type: string, message: string, metadata?: any) {
   const event: AppEvent = {
     id: Math.random().toString(36).substring(2, 9),
@@ -742,6 +1106,7 @@ function addEvent(type: string, message: string, metadata?: any) {
     metadata
   };
   events.push(event);
+  persistState();
   broadcast({ type: 'event', data: event });
 }
 
@@ -775,16 +1140,30 @@ async function startServer() {
   // --- API Routes ---
 
   app.get("/api/bootstrap", (req, res) => {
+    const configuredProviders = getConfiguredProviders();
     res.json({
-      system: "Quantum UACP v0",
-      version: "0.2.0-alpha",
+      system: "Quantum UACP",
+      version: "0.2.0",
       status: "operational",
       identity: "Gopher-Engine",
-      userEmail: process.env.USER_EMAIL || "ANON_AGENT"
+      userEmail: process.env.USER_EMAIL || "LOCAL_OPERATOR",
+      primaryProvider: getPrimaryProvider(),
+      primaryProviderLabel: formatProviderLabel(getPrimaryProvider()),
+      providerChain: configuredProviders.map(formatProviderLabel),
+      researchFeedSource: "arXiv",
     });
   });
 
   app.get("/api/plans", (req, res) => res.json(plans));
+
+  app.get("/api/plans/:planId", (req, res) => {
+    const plan = plans.find((entry) => entry.id === req.params.planId);
+    if (!plan) {
+      return res.status(404).json({ error: "Plan not found" });
+    }
+
+    res.json(plan);
+  });
   
   app.post("/api/plans", (req, res) => {
     const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
@@ -830,19 +1209,43 @@ async function startServer() {
 
   app.get("/api/runs", (req, res) => res.json(runs));
 
+  app.get("/api/runs/:runId", (req, res) => {
+    const run = runs.find((entry) => entry.id === req.params.runId);
+    if (!run) {
+      return res.status(404).json({ error: "Run not found" });
+    }
+
+    res.json(run);
+  });
+
+  app.get("/api/runs/:runId/plan", (req, res) => {
+    const run = runs.find((entry) => entry.id === req.params.runId);
+    if (!run) {
+      return res.status(404).json({ error: "Run not found" });
+    }
+
+    res.json(run.planSnapshot);
+  });
+
+  app.get("/api/runs/:runId/artifact", (req, res) => {
+    const run = runs.find((entry) => entry.id === req.params.runId);
+    if (!run) {
+      return res.status(404).json({ error: "Run not found" });
+    }
+
+    if (!run.artifact) {
+      return res.status(404).json({ error: "Artifact not ready" });
+    }
+
+    res.json(run.artifact);
+  });
+
   app.post("/api/runs", (req, res) => {
     const { planId } = req.body;
     const plan = plans.find(p => p.id === planId);
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
-    const newRun: Run = {
-      id: `run-${Math.random().toString(36).substring(2, 9)}`,
-      planId,
-      status: 'pending',
-      currentStep: 'Initializing Gateway',
-      progress: 0,
-      startTime: new Date().toISOString()
-    };
+    const newRun = createRunRecord(plan);
     runs.push(newRun);
     addEvent('RUN_STARTED', `Execution run started for plan ${planId}`, { runId: newRun.id, planId });
     
@@ -857,18 +1260,66 @@ async function startServer() {
   app.get("/api/events", (req, res) => res.json(events));
 
   app.get("/api/observability/signals", (req, res) => {
-    // Generate high-fidelity signals with trends
-    const t = Date.now();
+    const completedRuns = runs.filter((run) => run.status === "completed");
+    const activeRuns = runs.filter((run) => run.status === "pending" || run.status === "executing");
+    const totalNodes = plans.reduce((sum, plan) => sum + (Array.isArray(plan.graph?.nodes) ? plan.graph.nodes.length : 0), 0);
+    const policyTaggedNodes = plans.reduce((sum, plan) => (
+      sum + (Array.isArray(plan.graph?.nodes)
+        ? plan.graph.nodes.filter((node: any) => typeof node?.policy_tag === "string" && node.policy_tag.trim()).length
+        : 0)
+    ), 0);
+    const runDurations = completedRuns
+      .map((run) => {
+        if (!run.endTime) {
+          return 0;
+        }
+
+        return new Date(run.endTime).getTime() - new Date(run.startTime).getTime();
+      })
+      .filter((duration) => duration > 0);
+    const averageDurationMs = runDurations.length > 0
+      ? runDurations.reduce((sum, duration) => sum + duration, 0) / runDurations.length
+      : 0;
+    const averageProgress = activeRuns.length > 0
+      ? activeRuns.reduce((sum, run) => sum + run.progress, 0) / activeRuns.length
+      : completedRuns.length > 0
+        ? 100
+        : 0;
+    const policyAlignment = totalNodes > 0 ? policyTaggedNodes / totalNodes : 1;
+    const pressure = activeRuns.length > 0 ? activeRuns.length / Math.max(1, runs.length) : 0;
+    const completionRate = runs.length > 0 ? completedRuns.length / runs.length : 0;
+    const coherence = Math.min(100, Math.max(0, averageProgress));
+    const latency = averageDurationMs > 0
+      ? averageDurationMs / Math.max(1, Math.round(totalNodes / Math.max(1, plans.length)))
+      : 0;
+    const certaintyIndex = Math.min(0.9999, Math.max(
+      0,
+      (policyAlignment * 0.45) + (completionRate * 0.35) + ((coherence / 100) * 0.2)
+    ));
+
     res.json({
-      quantum_coherence: 88 + Math.sin(t/5000) * 5,
-      classical_latency: 14 + Math.cos(t/3000) * 3,
-      uacp_pressure: Math.max(0, 0.05 + Math.sin(t/8000) * 0.04),
-      gopher_policy_alignment: 0.992 + (Math.random() * 0.005),
+      quantum_coherence: coherence,
+      classical_latency: Number(latency.toFixed(1)),
+      uacp_pressure: Number(pressure.toFixed(3)),
+      gopher_policy_alignment: Number(policyAlignment.toFixed(3)),
+      certainty_index: Number(certaintyIndex.toFixed(4)),
       market_convergence: marketConvergence,
       horowitz_signals: [
-        { id: 'UACP_PRESSURE', value: 0.82 + Math.sin(t/10000)*0.1, trend: 'rising' },
-        { id: 'COHERENCE_TRANSITION', value: 0.45 + Math.cos(t/6000)*0.05, trend: 'stable' },
-        { id: 'SIGNAL_NOISE', value: 0.12 + Math.sin(t/2000)*0.02, trend: 'falling' }
+        {
+          id: 'RUN_COMPLETION',
+          value: Number(completionRate.toFixed(3)),
+          trend: completionRate >= 0.5 ? 'rising' : 'stable'
+        },
+        {
+          id: 'POLICY_ALIGNMENT',
+          value: Number(policyAlignment.toFixed(3)),
+          trend: policyAlignment >= 0.9 ? 'rising' : 'stable'
+        },
+        {
+          id: 'EXECUTION_PRESSURE',
+          value: Number(pressure.toFixed(3)),
+          trend: pressure > 0.5 ? 'rising' : 'falling'
+        }
       ]
     });
   });
@@ -877,7 +1328,15 @@ async function startServer() {
     const run = runs.find(r => r.id === runId);
     if (!run) return;
 
-    const plan = plans.find(p => p.id === run.planId);
+    const plan = run.planSnapshot || plans.find(p => p.id === run.planId);
+    if (!plan) {
+      run.status = "failed";
+      run.output = "Run failed because the plan snapshot could not be resolved.";
+      persistState();
+      addEvent("RUN_FAILED", `Execution run ${runId} failed because the plan snapshot is missing`, { runId });
+      broadcast({ type: "run_update", data: run });
+      return;
+    }
     
     const baseSteps = [
       { step: 'Quantum State Preparation', progress: 20 },
@@ -900,21 +1359,26 @@ async function startServer() {
       run.status = 'executing';
       run.currentStep = step.step;
       run.progress = step.progress;
+      persistState();
       addEvent('RUN_UPDATE', `Run ${runId}: ${step.step}`, { runId, progress: step.progress });
       broadcast({ type: 'run_update', data: run });
     }
 
-    // Final Intelligence Summary using AI
+    // Compile the completed run into a durable artifact
     try {
-      const summary = await generateRunSummary(plan);
-      run.output = summary.text;
+      const artifactResult = await generateRunArtifact(plan, run);
+      run.artifact = artifactResult.artifact;
+      run.output = artifactResult.artifact.finalReport;
     } catch (e) {
-      console.error("Summary error:", e);
-      run.output = "Execution finalized. Deterministic outcomes verified across all research nodes.";
+      console.error("Artifact error:", e);
+      const fallbackArtifact = createFallbackArtifact(plan, run);
+      run.artifact = fallbackArtifact;
+      run.output = fallbackArtifact.finalReport;
     }
 
     run.status = 'completed';
     run.endTime = new Date().toISOString();
+    persistState();
     addEvent('RUN_COMPLETED', `Run ${runId} finalized successfully`, { runId });
     broadcast({ type: 'run_update', data: run });
   }

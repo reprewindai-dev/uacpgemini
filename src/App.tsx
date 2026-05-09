@@ -38,6 +38,7 @@ interface Plan {
   id: string;
   name: string;
   intent: string;
+  revision?: number;
   graph: {
     nodes: Array<{
       id: string;
@@ -52,14 +53,61 @@ interface Plan {
   createdAt: string;
 }
 
+interface RunArtifact {
+  artifactId: string;
+  title: string;
+  generatedAt: string;
+  planId: string;
+  runId: string;
+  originalIntent: string;
+  generatedGraph: Plan["graph"];
+  nodeList: Plan["graph"]["nodes"];
+  policyTags: string[];
+  runContract: {
+    objective: string;
+    acceptanceCriteria: string[];
+    constraints: string[];
+    successMetric: string;
+  };
+  phaseOutputs: Array<{
+    phase: string;
+    nodeId: string;
+    output: string;
+  }>;
+  today: string[];
+  next72Hours: string[];
+  day7: string[];
+  risks: string[];
+  archives: string[];
+  commandCenterSignals: string[];
+  finalReport: string;
+  archiveRecord: {
+    recordId: string;
+    summary: string;
+    entries: string[];
+  };
+  nextAction: string;
+}
+
 interface Run {
   id: string;
   planId: string;
+  planSnapshot?: Plan;
+  artifact?: RunArtifact;
   status: string;
   progress: number;
   currentStep: string;
   startTime: string;
   output?: string;
+  endTime?: string;
+}
+
+interface BootstrapPayload {
+  userEmail: string;
+  primaryProvider: string;
+  primaryProviderLabel: string;
+  providerChain: string[];
+  researchFeedSource: string;
 }
 
 export default function App() {
@@ -68,31 +116,45 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [compileError, setCompileError] = useState<string | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
+  const [selectedArtifactRun, setSelectedArtifactRun] = useState<Run | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [events, setEvents] = useState<any[]>([]);
   const [signals, setSignals] = useState<any>(null);
   const [ssrnData, setSsrnData] = useState<SSRNSignal[]>([]);
-  const [identity, setIdentity] = useState<string>("ANON_AGENT");
+  const [identity, setIdentity] = useState<string>("LOCAL_OPERATOR");
+  const [providerLabel, setProviderLabel] = useState<string>("Deterministic fallback");
+  const [providerChain, setProviderChain] = useState<string[]>([]);
+  const [researchFeedSource, setResearchFeedSource] = useState<string>("arXiv");
+  const [signalHistory, setSignalHistory] = useState<Record<string, Array<{ val: number }>>>({});
   const socketRef = useRef<WebSocket | null>(null);
   const activePlan = plans[0];
+  const latestArtifactRun = runs.find((run) => run.artifact) ?? null;
 
   useEffect(() => {
     // Initial Bootstrap
     const fetchData = async () => {
       try {
-        const [p, r, e, s, b] = await Promise.all([
+        const [p, r, e, s, o, b] = await Promise.all([
           fetch("/api/plans").then(res => res.json()),
           fetch("/api/runs").then(res => res.json()),
           fetch("/api/events").then(res => res.json()),
           fetch("/api/ssrn-signals").then(res => res.json()),
+          fetch("/api/observability/signals").then(res => res.json()),
           fetch("/api/bootstrap").then(res => res.json())
         ]);
         setPlans(p);
         setRuns(r);
         setEvents(e);
         setSsrnData(s);
-        setIdentity(b.userEmail);
+        setSignals(o);
+        setSignalHistory(buildSignalHistory(o?.horowitz_signals || []));
+        const bootstrap = b as BootstrapPayload;
+        setIdentity(bootstrap.userEmail || "LOCAL_OPERATOR");
+        setProviderLabel(bootstrap.primaryProviderLabel || "Deterministic fallback");
+        setProviderChain(Array.isArray(bootstrap.providerChain) ? bootstrap.providerChain : []);
+        setResearchFeedSource(bootstrap.researchFeedSource || "arXiv");
       } catch (err) {
         console.error("Bootstrap error:", err);
       }
@@ -104,7 +166,10 @@ export default function App() {
     const interval = setInterval(() => {
       fetch("/api/observability/signals")
         .then(res => res.json())
-        .then(setSignals)
+        .then((nextSignals) => {
+          setSignals(nextSignals);
+          setSignalHistory(prev => appendSignalHistory(prev, nextSignals?.horowitz_signals || []));
+        })
         .catch(() => {});
     }, 4000);
 
@@ -123,6 +188,11 @@ export default function App() {
             next[idx] = msg.data;
             return next;
           });
+          setSelectedArtifactRun(prev => prev?.id === msg.data.id ? msg.data : prev);
+          if (msg.data.status === "completed" && msg.data.artifact) {
+            setSelectedArtifactRun(msg.data);
+            setActiveTab('ops');
+          }
         } else if (msg.type === 'event') {
           setEvents(prev => {
             const exists = prev.some(e => e.id === msg.data.id);
@@ -172,21 +242,19 @@ export default function App() {
     }
   };
 
-  const handleExportSchema = () => {
-    if (!activePlan) {
-      setExportMessage("No plan available to export");
-      return;
-    }
+  const resolveRunPlan = (run: Run) => run.planSnapshot ?? plans.find((plan) => plan.id === run.planId) ?? null;
 
+  const downloadPlanSchema = (plan: Plan, scope: "active" | "run" = "active") => {
     try {
-      const safeName = activePlan.name
+      const safeName = plan.name
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "") || "uacp-plan";
 
       const payload = {
         exportedAt: new Date().toISOString(),
-        plan: activePlan,
+        scope,
+        plan,
       };
 
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -195,7 +263,7 @@ export default function App() {
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = `${safeName}-${activePlan.id}-schema.json`;
+      link.download = `${safeName}-${plan.id}-schema.json`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -205,6 +273,46 @@ export default function App() {
       console.error("Export error:", error);
       setExportMessage("Schema export failed");
     }
+  };
+
+  const downloadArtifact = (run: Run) => {
+    if (!run.artifact) {
+      setExportMessage("Artifact is not ready yet");
+      return;
+    }
+
+    try {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        runId: run.id,
+        planId: run.planId,
+        artifact: run.artifact,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${run.artifact.artifactId}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      setExportMessage("Artifact downloaded");
+    } catch (error) {
+      console.error("Artifact export error:", error);
+      setExportMessage("Artifact export failed");
+    }
+  };
+
+  const handleExportSchema = () => {
+    if (!activePlan) {
+      setExportMessage("No plan available to export");
+      return;
+    }
+
+    downloadPlanSchema(activePlan, "active");
   };
 
   const handleStartRun = async (planId: string) => {
@@ -221,6 +329,18 @@ export default function App() {
       console.error("Run error:", error);
     }
   };
+
+  const currentSignalHistory = (signalId: string, fallbackValue: number) => {
+    const trace = signalHistory[signalId];
+    if (trace && trace.length > 0) {
+      return trace;
+    }
+
+    return [{ val: fallbackValue }];
+  };
+
+  const certaintyIndex = typeof signals?.certainty_index === "number" ? signals.certainty_index : 0;
+  const certaintyWidth = `${Math.max(0, Math.min(1, certaintyIndex)) * 100}%`;
 
   return (
     <div className="h-screen flex flex-col bg-[#050505] text-[#e0e0e0] font-sans selection:bg-blue-500/30 overflow-hidden relative">
@@ -252,7 +372,7 @@ export default function App() {
           
           <div className="flex items-center gap-3 px-4 py-1.5 border border-white/10 rounded-full bg-white/5 backdrop-blur-sm group cursor-help">
             <ShieldCheck size={12} className="text-blue-400" />
-            <span className="text-[9px] font-mono lowercase tracking-normal text-white/60">Node: Gemini Pro Integrated</span>
+            <span className="text-[9px] font-mono lowercase tracking-normal text-white/60">provider: {providerLabel.toLowerCase()}</span>
             <ArrowUpRight size={10} className="text-white/20 group-hover:text-blue-400 transition-colors" />
           </div>
         </nav>
@@ -268,7 +388,7 @@ export default function App() {
               <Search size={10} />
               Signal Ingestion Feed
             </h2>
-            <p className="text-[10px] text-white/30 italic">Continuous scanning of SSRN research nodes</p>
+            <p className="text-[10px] text-white/30 italic">Continuous scanning of live {researchFeedSource} research signals</p>
           </div>
           
           <div className="flex-1 overflow-y-auto custom-scrollbar p-1 pb-24">
@@ -283,13 +403,19 @@ export default function App() {
                   <div className="mt-3 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
-                      <span className="text-[8px] font-mono text-white/30 tracking-widest uppercase">Match Strength</span>
+                      <span className="text-[8px] font-mono text-white/30 tracking-widest uppercase">Relevance Score</span>
                     </div>
                     <span className="text-[10px] font-mono text-green-500/80">{sig.strength}%</span>
                   </div>
                 </div>
               ))}
             </div>
+
+            {ssrnData.length === 0 && (
+              <div className="p-6 text-[10px] font-mono uppercase tracking-[0.25em] text-white/25">
+                No live research signals available.
+              </div>
+            )}
             
             <div className="p-6 border-t border-white/5 mt-4">
               <h3 className="text-[9px] uppercase tracking-widest text-white/20 font-bold mb-4">Event Sequence Log</h3>
@@ -309,8 +435,8 @@ export default function App() {
 
           <div className="p-6 border-t border-white/5 bg-black/40">
             <div className="flex justify-between items-center text-[10px] mb-3 text-white/40 uppercase font-mono tracking-tighter">
-              <span>Policy Evaluation</span>
-              <span className="text-blue-400">Gopher v4.1</span>
+              <span>Policy Alignment</span>
+              <span className="text-blue-400">{providerLabel}</span>
             </div>
             <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden relative">
               <motion.div 
@@ -375,7 +501,7 @@ export default function App() {
                             </div>
                             <div className="space-y-2 text-center">
                               <span className="text-[11px] font-mono tracking-[0.3em] text-blue-400 block uppercase">Analyzing Complexity</span>
-                              <span className="text-[9px] font-mono text-white/30 uppercase">Negotiating with Gemini Core Matrix...</span>
+                              <span className="text-[9px] font-mono text-white/30 uppercase">Compiling with {providerLabel}...</span>
                             </div>
                           </div>
                         </div>
@@ -403,12 +529,12 @@ export default function App() {
 
                 <div className="mt-auto flex justify-between items-end border-t border-white/5 pt-6 text-[9px] uppercase tracking-[0.2em] font-mono text-white/20">
                   <div className="space-y-1">
-                    <div>Station: CONTROL_PLANE_ALPHA</div>
+                    <div>Station: CONTROL_PLANE_LIVE</div>
                     <div>Identity: {identity}</div>
                   </div>
                   <div className="text-right space-y-1">
-                    <div className="text-3xl font-serif italic text-white/70">0.0000001%</div>
-                    <div>Acceptable Non-Deterministic Entropy</div>
+                    <div className="text-3xl font-serif italic text-white/70">{certaintyIndex.toFixed(4)}</div>
+                    <div>Current Certainty Index</div>
                   </div>
                 </div>
               </motion.div>
@@ -423,7 +549,7 @@ export default function App() {
                 <div className="flex justify-between items-center mb-12 border-b border-white/5 pb-6">
                    <div className="space-y-1">
                     <h2 className="font-serif italic text-3xl text-white/90">Probability Matrix</h2>
-                    <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Plan Hierarchy Revision 1.0.4</p>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Plan Hierarchy Revision {activePlan?.revision || 1}</p>
                    </div>
                    <div className="flex gap-4">
                      {activePlan && (
@@ -461,7 +587,7 @@ export default function App() {
                       <div className="flex-1">
                         <span className="text-[9px] font-mono text-white/20 uppercase tracking-widest block mb-1">Strategic Briefing</span>
                         <p className="text-xs text-white/60 leading-relaxed italic">
-                          "{plans[0].intent}" — Sequence initialized with {plans[0].graph?.nodes?.length || 0} nodes. 
+                          "{activePlan.intent}" - Sequence initialized with {activePlan.graph?.nodes?.length || 0} nodes.
                           Anticipated deterministic yield is 99.9%. Policy markers AC-10 and AC-GLOBAL applied to all transition states.
                         </p>
                       </div>
@@ -585,19 +711,68 @@ export default function App() {
                 </div>
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar space-y-8 pr-6">
-                   {runs.map((run) => (
+                   {runs.map((run) => {
+                     const runPlan = resolveRunPlan(run);
+
+                     return (
                      <div key={run.id} className="glass-panel p-8 relative overflow-hidden group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-blue-500 opacity-20 group-hover:opacity-100 transition-opacity" />
                         
                         <div className="flex justify-between items-start mb-8">
                           <div className="space-y-2">
-                             <div className="flex items-center gap-4">
-                                <span className="font-mono text-xs font-bold text-white tracking-widest">{run.id}</span>
-                                <span className={`text-[9px] px-2 py-0.5 border rounded-full uppercase tracking-widest font-bold ${run.status === 'completed' ? 'border-green-500/20 text-green-500 bg-green-500/5' : 'border-blue-500/20 text-blue-400 bg-blue-500/5'}`}>
-                                  {run.status.toUpperCase()}
-                                </span>
-                             </div>
-                             <p className="text-[10px] text-white/40 font-mono italic">Compiled Reference: {run.planId}</p>
+                              <div className="flex items-center gap-4">
+                                 <span className="font-mono text-xs font-bold text-white tracking-widest">{run.id}</span>
+                                 <span className={`text-[9px] px-2 py-0.5 border rounded-full uppercase tracking-widest font-bold ${run.status === 'completed' ? 'border-green-500/20 text-green-500 bg-green-500/5' : 'border-blue-500/20 text-blue-400 bg-blue-500/5'}`}>
+                                   {run.status.toUpperCase()}
+                                 </span>
+                              </div>
+                              <div className="flex items-center gap-3 text-[10px] text-white/40 font-mono italic">
+                                <span>Compiled Reference:</span>
+                                <button
+                                  onClick={() => run.artifact && setSelectedArtifactRun(run)}
+                                  disabled={!run.artifact}
+                                  className="text-blue-300 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  {run.planId}
+                                </button>
+                                <button
+                                  onClick={() => run.artifact && setSelectedArtifactRun(run)}
+                                  disabled={!run.artifact}
+                                  className="text-blue-300 hover:text-white transition-colors uppercase tracking-[0.3em] disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  [Open Artifact]
+                                </button>
+                              </div>
+                              <div className="flex gap-3 pt-2">
+                                <button
+                                  onClick={() => runPlan && setSelectedPlan(runPlan)}
+                                  disabled={!runPlan}
+                                  className="text-[9px] font-mono uppercase tracking-[0.3em] text-blue-300 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  View Plan
+                                </button>
+                                <button
+                                  onClick={() => run.artifact && setSelectedArtifactRun(run)}
+                                  disabled={!run.artifact}
+                                  className="text-[9px] font-mono uppercase tracking-[0.3em] text-purple-300 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  Open Artifact
+                                </button>
+                                <button
+                                  onClick={() => runPlan && downloadPlanSchema(runPlan, "run")}
+                                  disabled={!runPlan}
+                                  className="text-[9px] font-mono uppercase tracking-[0.3em] text-white/40 hover:text-blue-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  Download Plan
+                                </button>
+                                <button
+                                  onClick={() => downloadArtifact(run)}
+                                  disabled={!run.artifact}
+                                  className="text-[9px] font-mono uppercase tracking-[0.3em] text-white/40 hover:text-purple-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  Download Artifact
+                                </button>
+                              </div>
                           </div>
                           <div className="text-right">
                              <div className="text-4xl font-serif italic text-white/90 tabular-nums">{run.progress}%</div>
@@ -624,15 +799,15 @@ export default function App() {
                               />
                            </div>
                            
-                           {/* Step Micro-Labels */}
-                           <div className="flex justify-between mt-2 overflow-hidden">
-                              {plans.find(p => p.id === run.planId)?.graph.nodes.map((node, nIdx) => (
+                            {/* Step Micro-Labels */}
+                            <div className="flex justify-between mt-2 overflow-hidden">
+                              {runPlan ? runPlan.graph.nodes.map((node, nIdx) => (
                                 <div key={`${node.id}-${nIdx}`} className="flex flex-col items-center gap-1 opacity-20 hover:opacity-100 transition-opacity cursor-default">
-                                  <div className={`w-1 h-1 rounded-full ${nIdx / (plans.find(p => p.id === run.planId)?.graph.nodes.length || 1) * 100 <= run.progress ? 'bg-blue-400' : 'bg-white/40'}`} />
+                                  <div className={`w-1 h-1 rounded-full ${nIdx / (runPlan.graph.nodes.length || 1) * 100 <= run.progress ? 'bg-blue-400' : 'bg-white/40'}`} />
                                   <span className="text-[7px] font-mono uppercase tracking-tighter">{node.id}</span>
                                 </div>
-                              ))}
-                           </div>
+                              )) : null}
+                            </div>
                         </div>
 
                         {run.status === 'completed' && run.output && (
@@ -658,7 +833,7 @@ export default function App() {
                            </motion.div>
                         )}
                      </div>
-                   ))}
+                   )})}
                    
                    {runs.length === 0 && (
                      <div className="h-full flex flex-col items-center justify-center opacity-20 space-y-6">
@@ -693,21 +868,10 @@ export default function App() {
                 />
               ))}
               
-              {!signals?.market_convergence && (
-                <>
-                  <ConvergenceBar 
-                    label="Deterministic Alpha" 
-                    value={"+14.2%"} 
-                    progress={0.72} 
-                    color="blue" 
-                  />
-                  <ConvergenceBar 
-                    label="Market Heuristics" 
-                    value={"+8.7%"} 
-                    progress={0.58} 
-                    color="purple" 
-                  />
-                </>
+              {(!signals?.market_convergence || signals.market_convergence.length === 0) && (
+                <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/25">
+                  No live market convergence data available.
+                </div>
               )}
               
               <div className="pt-8 border-t border-white/5 space-y-6">
@@ -724,7 +888,7 @@ export default function App() {
                     
                     <div className="h-16 w-full opacity-50 overflow-hidden grayscale hover:grayscale-0 transition-all duration-700">
                        <ResponsiveContainer width="100%" height="100%" minHeight={60} minWidth={100}>
-                          <AreaChart data={Array.from({length: 20}, () => ({ val: Math.random() }))}>
+                          <AreaChart data={currentSignalHistory(sig.id, sig.value)}>
                             <defs>
                               <linearGradient id={`grad-${sig.id}`} x1="0" y1="0" x2="0" y2="1">
                                 <stop offset="5%" stopColor={sig.trend === 'rising' ? "#10b981" : "#3b82f6"} stopOpacity={0.3}/>
@@ -742,14 +906,18 @@ export default function App() {
               <div className="p-5 glass-panel rounded border-white/5 bg-white/[0.01] mt-8">
                  <h3 className="text-[9px] uppercase tracking-widest text-white/30 font-bold mb-4 flex items-center gap-2">
                    <Info size={10} className="text-blue-400" />
-                   Agent Consensus
+                   Compiled Artifact
                  </h3>
                  <div className="text-xs text-white/60 italic leading-relaxed font-light">
-                  "My strategy is grounded in the great agent Gemini. The signals converge on a singular outcome."
+                  {latestArtifactRun?.artifact?.finalReport || "Complete a run to populate the compiled artifact."}
                  </div>
                  <div className="mt-4 flex items-center gap-2">
-                    <div className="w-4 h-4 rounded-full bg-blue-500/10 flex items-center justify-center text-[8px] text-blue-400 italic">g</div>
-                    <span className="text-[8px] font-mono text-white/20 uppercase tracking-widest">— GEMINI CORE MATRIX</span>
+                    <div className="w-4 h-4 rounded-full bg-blue-500/10 flex items-center justify-center text-[8px] text-blue-400 font-mono">
+                      {latestArtifactRun?.id?.slice(-1).toUpperCase() || "A"}
+                    </div>
+                    <span className="text-[8px] font-mono text-white/20 uppercase tracking-widest">
+                      {latestArtifactRun?.artifact?.nextAction || `Provider chain: ${providerChain.join(" -> ") || providerLabel}`}
+                    </span>
                  </div>
               </div>
            </div>
@@ -758,7 +926,7 @@ export default function App() {
               <div className="flex flex-col gap-4">
                 <div className="flex justify-between items-center text-[9px] font-mono text-white/20 uppercase tracking-widest">
                   <span>Certainty Index</span>
-                  <span className="text-white text-sm font-serif italic">0.9999</span>
+                  <span className="text-white text-sm font-serif italic">{certaintyIndex.toFixed(4)}</span>
                 </div>
                 <div className="h-[2px] w-full bg-white/5 relative overflow-hidden">
                   <motion.div 
@@ -766,12 +934,258 @@ export default function App() {
                     animate={{ x: [-100, 400] }}
                     transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
                   />
-                  <div className="absolute right-0 top-0 h-full bg-blue-400 shadow-[0_0_10px_rgba(59,130,246,1)]" style={{ width: '0.1%' }} />
+                  <div className="absolute left-0 top-0 h-full bg-blue-400 shadow-[0_0_10px_rgba(59,130,246,1)]" style={{ width: certaintyWidth }} />
                 </div>
               </div>
            </div>
         </section>
       </main>
+
+      {selectedArtifactRun?.artifact && (
+        <div className="absolute inset-0 z-[75] bg-black/85 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="w-full max-w-6xl max-h-[90vh] overflow-hidden border border-white/10 bg-[#090909] shadow-2xl">
+            <div className="flex items-start justify-between gap-6 p-6 border-b border-white/10 bg-white/[0.02]">
+              <div className="space-y-2">
+                <span className="text-[10px] uppercase tracking-[0.35em] text-purple-300/70 font-mono">Compiled Artifact</span>
+                <h3 className="font-serif italic text-3xl text-white/90">{selectedArtifactRun.artifact.title}</h3>
+                <div className="flex gap-6 text-[10px] font-mono uppercase tracking-[0.25em] text-white/40">
+                  <span>Plan ID: {selectedArtifactRun.planId}</span>
+                  <span>Run ID: {selectedArtifactRun.id}</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => downloadArtifact(selectedArtifactRun)}
+                  className="px-4 py-2 border border-purple-500/20 text-[10px] uppercase tracking-[0.3em] font-mono text-purple-200 hover:bg-purple-500/10 transition-colors"
+                >
+                  Download Artifact
+                </button>
+                <button
+                  onClick={() => setSelectedArtifactRun(null)}
+                  className="px-4 py-2 border border-white/10 text-[10px] uppercase tracking-[0.3em] font-mono text-white/60 hover:text-white transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-12 max-h-[calc(90vh-88px)] overflow-hidden">
+              <div className="col-span-7 overflow-y-auto p-6 border-r border-white/10 space-y-6">
+                <ArtifactSection title="Original Intent">
+                  <p className="text-sm text-white/80 leading-relaxed">{selectedArtifactRun.artifact.originalIntent}</p>
+                </ArtifactSection>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <ArtifactSection title="Run Contract">
+                    <div className="space-y-3 text-sm text-white/75">
+                      <p>{selectedArtifactRun.artifact.runContract.objective}</p>
+                      <div>
+                        <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/35 mb-2">Acceptance Criteria</div>
+                        {selectedArtifactRun.artifact.runContract.acceptanceCriteria.map((item, index) => (
+                          <div key={`${item}-${index}`} className="mb-2">{item}</div>
+                        ))}
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/35 mb-2">Constraints</div>
+                        {selectedArtifactRun.artifact.runContract.constraints.map((item, index) => (
+                          <div key={`${item}-${index}`} className="mb-2">{item}</div>
+                        ))}
+                      </div>
+                    </div>
+                  </ArtifactSection>
+
+                  <ArtifactSection title="Next Action">
+                    <p className="text-sm text-white/80 leading-relaxed">{selectedArtifactRun.artifact.nextAction}</p>
+                  </ArtifactSection>
+                </div>
+
+                <ArtifactSection title="Phase Outputs">
+                  <div className="space-y-3">
+                    {selectedArtifactRun.artifact.phaseOutputs.map((phase, index) => (
+                      <div key={`${phase.nodeId}-${index}`} className="border border-white/10 p-4 bg-white/[0.02]">
+                        <div className="flex items-center justify-between gap-4">
+                          <span className="text-[10px] font-mono uppercase tracking-[0.25em] text-blue-300/80">{phase.phase}</span>
+                          <span className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/35">{phase.nodeId}</span>
+                        </div>
+                        <p className="mt-3 text-sm text-white/75 leading-relaxed">{phase.output}</p>
+                      </div>
+                    ))}
+                  </div>
+                </ArtifactSection>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <ArtifactSection title="Today">
+                    {selectedArtifactRun.artifact.today.map((item, index) => (
+                      <p key={`${item}-${index}`} className="mb-2 text-sm text-white/75 leading-relaxed">{item}</p>
+                    ))}
+                  </ArtifactSection>
+
+                  <ArtifactSection title="Next 72 Hours">
+                    {selectedArtifactRun.artifact.next72Hours.map((item, index) => (
+                      <p key={`${item}-${index}`} className="mb-2 text-sm text-white/75 leading-relaxed">{item}</p>
+                    ))}
+                  </ArtifactSection>
+
+                  <ArtifactSection title="Day 7">
+                    {selectedArtifactRun.artifact.day7.map((item, index) => (
+                      <p key={`${item}-${index}`} className="mb-2 text-sm text-white/75 leading-relaxed">{item}</p>
+                    ))}
+                  </ArtifactSection>
+
+                  <ArtifactSection title="Risks">
+                    {selectedArtifactRun.artifact.risks.map((item, index) => (
+                      <p key={`${item}-${index}`} className="mb-2 text-sm text-white/75 leading-relaxed">{item}</p>
+                    ))}
+                  </ArtifactSection>
+
+                  <ArtifactSection title="Archives">
+                    {selectedArtifactRun.artifact.archives.map((item, index) => (
+                      <p key={`${item}-${index}`} className="mb-2 text-sm text-white/75 leading-relaxed">{item}</p>
+                    ))}
+                  </ArtifactSection>
+
+                  <ArtifactSection title="Command Center Signals">
+                    {selectedArtifactRun.artifact.commandCenterSignals.map((item, index) => (
+                      <p key={`${item}-${index}`} className="mb-2 text-sm text-white/75 leading-relaxed">{item}</p>
+                    ))}
+                  </ArtifactSection>
+                </div>
+
+                <ArtifactSection title="Final Output Report">
+                  <p className="text-sm text-white/85 leading-relaxed">{selectedArtifactRun.artifact.finalReport}</p>
+                </ArtifactSection>
+
+                <ArtifactSection title="Archive Record">
+                  <div className="space-y-2 text-sm text-white/75">
+                    <p>{selectedArtifactRun.artifact.archiveRecord.summary}</p>
+                    {selectedArtifactRun.artifact.archiveRecord.entries.map((entry, index) => (
+                      <p key={`${entry}-${index}`}>{entry}</p>
+                    ))}
+                  </div>
+                </ArtifactSection>
+              </div>
+
+              <div className="col-span-5 overflow-y-auto p-6 space-y-6">
+                <ArtifactSection title="Node List">
+                  <div className="space-y-3">
+                    {selectedArtifactRun.artifact.nodeList.map((node, index) => (
+                      <div key={`${node.id}-${index}`} className="border border-white/10 p-4 bg-white/[0.02]">
+                        <div className="flex justify-between items-center gap-4">
+                          <span className="text-sm font-mono text-white/90 uppercase">{node.id}</span>
+                          <span className="text-[10px] font-mono uppercase tracking-[0.25em] text-purple-300/80">{node.type}</span>
+                        </div>
+                        <p className="mt-3 text-sm text-white/75 leading-relaxed">{node.description}</p>
+                        <div className="mt-3 text-[10px] font-mono uppercase tracking-[0.2em] text-white/35">
+                          Policy: {node.policy_tag || "AC-GLOBAL"} | Entropy: {node.entropy ?? 0}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </ArtifactSection>
+
+                <ArtifactSection title="Policy Tags">
+                  <div className="flex flex-wrap gap-2">
+                    {selectedArtifactRun.artifact.policyTags.map((tag, index) => (
+                      <span key={`${tag}-${index}`} className="px-3 py-2 border border-blue-500/20 text-[10px] font-mono uppercase tracking-[0.25em] text-blue-200 bg-blue-500/5">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </ArtifactSection>
+
+                <ArtifactSection title="Generated Graph">
+                  <pre className="text-xs text-white/70 bg-black/60 border border-white/10 p-4 overflow-auto whitespace-pre-wrap break-all">
+                    {JSON.stringify(selectedArtifactRun.artifact.generatedGraph, null, 2)}
+                  </pre>
+                </ArtifactSection>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedPlan && (
+        <div className="absolute inset-0 z-[70] bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="w-full max-w-5xl max-h-[88vh] overflow-hidden border border-white/10 bg-[#090909] shadow-2xl">
+            <div className="flex items-start justify-between gap-6 p-6 border-b border-white/10 bg-white/[0.02]">
+              <div className="space-y-2">
+                <span className="text-[10px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Plan Archive</span>
+                <h3 className="font-serif italic text-3xl text-white/90">{selectedPlan.name}</h3>
+                <p className="text-xs text-white/45 font-mono">Plan ID: {selectedPlan.id}</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => downloadPlanSchema(selectedPlan, "run")}
+                  className="px-4 py-2 border border-blue-500/20 text-[10px] uppercase tracking-[0.3em] font-mono text-blue-200 hover:bg-blue-500/10 transition-colors"
+                >
+                  Download JSON
+                </button>
+                <button
+                  onClick={() => setSelectedPlan(null)}
+                  className="px-4 py-2 border border-white/10 text-[10px] uppercase tracking-[0.3em] font-mono text-white/60 hover:text-white transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-0 max-h-[calc(88vh-88px)] overflow-hidden">
+              <div className="p-6 overflow-y-auto border-r border-white/10 space-y-6">
+                <div className="space-y-2">
+                  <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Intent</span>
+                  <p className="text-sm text-white/80 leading-relaxed">{selectedPlan.intent}</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 text-[10px] font-mono uppercase tracking-[0.25em] text-white/35">
+                  <div className="border border-white/10 p-4">
+                    <div>Created</div>
+                    <div className="mt-2 text-white/70 normal-case tracking-normal">{new Date(selectedPlan.createdAt).toLocaleString()}</div>
+                  </div>
+                  <div className="border border-white/10 p-4">
+                    <div>Status</div>
+                    <div className="mt-2 text-white/70 normal-case tracking-normal">{selectedPlan.status}</div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Execution Nodes</span>
+                  {selectedPlan.graph.nodes.map((node, index) => (
+                    <div key={`${node.id}-${index}`} className="border border-white/10 p-4 bg-white/[0.02]">
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-sm font-mono text-white/90 uppercase">{node.id}</span>
+                        <span className="text-[9px] font-mono uppercase tracking-[0.25em] text-blue-300/80">{node.type}</span>
+                      </div>
+                      <p className="mt-3 text-sm text-white/70 leading-relaxed">{node.description}</p>
+                      <div className="mt-4 flex gap-6 text-[10px] font-mono uppercase tracking-[0.2em] text-white/35">
+                        <span>Policy: {node.policy_tag || "AC-GLOBAL"}</span>
+                        <span>Entropy: {node.entropy ?? 0}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-3">
+                  <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Edges</span>
+                  <div className="border border-white/10 p-4 bg-white/[0.02] space-y-2">
+                    {selectedPlan.graph.edges.map((edge, index) => (
+                      <div key={`${edge.from}-${edge.to}-${index}`} className="text-sm text-white/70 font-mono">
+                        {edge.from} {"->"} {edge.to}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-3">
+                <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Raw Schema</span>
+                <pre className="text-xs text-white/70 bg-black/60 border border-white/10 p-4 overflow-auto whitespace-pre-wrap break-all">
+                  {JSON.stringify(selectedPlan, null, 2)}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer Status Bar */}
       <footer className="h-8 bg-[#050505] border-t border-white/10 flex items-center justify-between px-8 text-[9px] uppercase tracking-[0.3em] text-white/30 font-mono z-50">
@@ -792,7 +1206,7 @@ export default function App() {
         <div className="flex gap-6 items-center">
           <span>AI Studio Build 2026.05.06</span>
           <div className="h-3 w-px bg-white/10" />
-          <span>© DETERMINISTIC RESEARCH • UNIVERSAL CONTROL PROTOTYPE</span>
+          <span>© DETERMINISTIC RESEARCH • UNIVERSAL CONTROL PLANE</span>
         </div>
       </footer>
     </div>
@@ -813,6 +1227,36 @@ function TabButton({ active, onClick, label }: { active: boolean, onClick: () =>
         />
       )}
     </button>
+  );
+}
+
+function buildSignalHistory(signalList: Array<{ id: string; value: number }>) {
+  return signalList.reduce<Record<string, Array<{ val: number }>>>((accumulator, signal) => {
+    accumulator[signal.id] = [{ val: signal.value }];
+    return accumulator;
+  }, {});
+}
+
+function appendSignalHistory(
+  previous: Record<string, Array<{ val: number }>>,
+  signalList: Array<{ id: string; value: number }>
+) {
+  const next = { ...previous };
+
+  for (const signal of signalList) {
+    const existing = next[signal.id] || [];
+    next[signal.id] = [...existing, { val: signal.value }].slice(-20);
+  }
+
+  return next;
+}
+
+function ArtifactSection({ title, children }: { title: string, children: ReactNode }) {
+  return (
+    <section className="border border-white/10 p-4 bg-white/[0.02]">
+      <div className="text-[10px] font-mono uppercase tracking-[0.3em] text-white/35 mb-4">{title}</div>
+      {children}
+    </section>
   );
 }
 
