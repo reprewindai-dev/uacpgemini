@@ -117,6 +117,8 @@ interface RunArtifact {
     recordId: string;
     summary: string;
     entries: string[];
+    previousHash?: string | null;
+    recordHash?: string;
   };
   nextAction: string;
 }
@@ -156,6 +158,8 @@ interface ReplayRecord {
     referenceId: string;
     timestamp: string;
     summary: string;
+    previousHash?: string | null;
+    recordHash?: string;
   }>;
 }
 
@@ -1364,6 +1368,16 @@ export default function App() {
                 <ArtifactSection title="Archive Record">
                   <div className="space-y-2 text-sm text-white/75">
                     <p>{selectedArtifactRun.artifact.archiveRecord.summary}</p>
+                    {selectedArtifactRun.artifact.archiveRecord.recordHash && (
+                      <p className="text-[10px] font-mono text-cyan-300/80 break-all">
+                        record_hash: {selectedArtifactRun.artifact.archiveRecord.recordHash}
+                      </p>
+                    )}
+                    {selectedArtifactRun.artifact.archiveRecord.previousHash && (
+                      <p className="text-[10px] font-mono text-white/45 break-all">
+                        previous_hash: {selectedArtifactRun.artifact.archiveRecord.previousHash}
+                      </p>
+                    )}
                     {selectedArtifactRun.artifact.archiveRecord.entries.map((entry, index) => (
                       <p key={`${entry}-${index}`}>{entry}</p>
                     ))}
@@ -1378,15 +1392,25 @@ export default function App() {
                       </div>
                       {selectedReplay.checkpoints.map((checkpoint, index) => (
                         <div key={`${checkpoint.referenceId}-${index}`} className="border border-white/10 p-4 bg-white/[0.02]">
-                          <div className="flex items-center justify-between gap-4 text-[10px] font-mono uppercase tracking-[0.25em]">
-                            <span className="text-blue-300/80">{checkpoint.stage}</span>
-                            <span className="text-white/35">{checkpoint.referenceId}</span>
-                          </div>
-                          <div className="mt-2 text-[10px] font-mono text-white/35">{new Date(checkpoint.timestamp).toLocaleString()}</div>
-                          <p className="mt-3 text-sm text-white/75 leading-relaxed">{checkpoint.summary}</p>
+                        <div className="flex items-center justify-between gap-4 text-[10px] font-mono uppercase tracking-[0.25em]">
+                          <span className="text-blue-300/80">{checkpoint.stage}</span>
+                          <span className="text-white/35">{checkpoint.referenceId}</span>
                         </div>
-                      ))}
-                    </div>
+                        <div className="mt-2 text-[10px] font-mono text-white/35">{new Date(checkpoint.timestamp).toLocaleString()}</div>
+                        {checkpoint.recordHash && (
+                          <div className="mt-2 text-[10px] font-mono text-cyan-300/80 break-all">
+                            record_hash: {checkpoint.recordHash}
+                          </div>
+                        )}
+                        {checkpoint.previousHash && (
+                          <div className="mt-1 text-[10px] font-mono text-white/45 break-all">
+                            previous_hash: {checkpoint.previousHash}
+                          </div>
+                        )}
+                        <p className="mt-3 text-sm text-white/75 leading-relaxed">{checkpoint.summary}</p>
+                      </div>
+                    ))}
+                  </div>
                   ) : (
                     <p className="text-sm text-white/55 leading-relaxed">Replay record unavailable.</p>
                   )}

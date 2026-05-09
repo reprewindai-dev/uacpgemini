@@ -171,6 +171,8 @@ interface AppEvent {
   message: string;
   timestamp: string;
   metadata?: any;
+  previousHash?: string | null;
+  recordHash?: string;
 }
 
 interface RunArtifact {
@@ -213,6 +215,8 @@ interface RunArtifact {
     recordId: string;
     summary: string;
     entries: string[];
+    previousHash?: string | null;
+    recordHash?: string;
   };
   nextAction: string;
 }
@@ -226,6 +230,8 @@ interface PersistedArchiveRecord {
   deploymentStatus: RunArtifact["statusModel"]["deployment_status"];
   summary: string;
   entries: string[];
+  previousHash?: string | null;
+  recordHash?: string;
 }
 
 interface ReplayRecord {
@@ -240,6 +246,8 @@ interface ReplayRecord {
     referenceId: string;
     timestamp: string;
     summary: string;
+    previousHash?: string | null;
+    recordHash?: string;
   }>;
 }
 
@@ -304,6 +312,79 @@ let persistQueue: Promise<void> = Promise.resolve();
 
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`);
+
+  return `{${entries.join(",")}}`;
+}
+
+function sha256Hex(value: string) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function computeEventHash(event: Pick<AppEvent, "id" | "type" | "message" | "timestamp" | "metadata" | "previousHash">) {
+  return sha256Hex(stableStringify({
+    id: event.id,
+    type: event.type,
+    message: event.message,
+    timestamp: event.timestamp,
+    metadata: event.metadata || null,
+    previousHash: event.previousHash || null,
+  }));
+}
+
+function computeArchiveHash(record: Pick<PersistedArchiveRecord, "recordId" | "runId" | "planId" | "createdAt" | "claimLevel" | "deploymentStatus" | "summary" | "entries" | "previousHash">) {
+  return sha256Hex(stableStringify({
+    recordId: record.recordId,
+    runId: record.runId,
+    planId: record.planId,
+    createdAt: record.createdAt,
+    claimLevel: record.claimLevel,
+    deploymentStatus: record.deploymentStatus,
+    summary: record.summary,
+    entries: record.entries,
+    previousHash: record.previousHash || null,
+  }));
+}
+
+function rehashAuditChains() {
+  let previousEventHash: string | null = null;
+  events = events
+    .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime())
+    .map((event) => {
+      const nextEvent: AppEvent = {
+        ...event,
+        previousHash: previousEventHash,
+      };
+      nextEvent.recordHash = computeEventHash(nextEvent);
+      previousEventHash = nextEvent.recordHash;
+      return nextEvent;
+    });
+
+  let previousArchiveHash: string | null = null;
+  archiveRecords = archiveRecords
+    .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
+    .map((record) => {
+      const nextRecord: PersistedArchiveRecord = {
+        ...record,
+        previousHash: previousArchiveHash,
+      };
+      nextRecord.recordHash = computeArchiveHash(nextRecord);
+      previousArchiveHash = nextRecord.recordHash;
+      return nextRecord;
+    });
 }
 
 function buildAppStateSnapshot(): AppState {
@@ -443,6 +524,7 @@ function clearSessionCookie(response: express.Response) {
 
 function persistState() {
   ensureDataFileDirectory();
+  rehashAuditChains();
   const state = buildAppStateSnapshot();
   writeFileSync(DATA_FILE_PATH, JSON.stringify(state, null, 2), "utf8");
 
@@ -520,6 +602,7 @@ function loadPersistedStateFromFile() {
 
     const parsed = JSON.parse(raw) as Partial<AppState>;
     applyLoadedState(parsed);
+    rehashAuditChains();
   } catch (error) {
     console.error("State load error:", error);
     plans = [];
@@ -1864,6 +1947,8 @@ function createFallbackArtifact(plan: Plan, run: Run): RunArtifact {
         `Node outputs recorded: ${nodes.map((node) => node.id).join(", ") || "none"}`,
         `Status model: plan=${statusModel.plan_status}, run=${statusModel.run_status}, artifact=${statusModel.artifact_status}, signals=${statusModel.signal_status}, deployment=${statusModel.deployment_status}`,
       ],
+      previousHash: undefined,
+      recordHash: undefined,
     },
     nextAction: "Review the compiled artifact, promote the draft plan when evidence is complete, and run deployment verification before making implementation claims.",
   };
@@ -1930,6 +2015,8 @@ function normalizeArtifactResponse(data: any, plan: Plan, run: Run): RunArtifact
       entries: Array.isArray(data?.archiveRecord?.entries) && data.archiveRecord.entries.length > 0
         ? [...data.archiveRecord.entries.map(String), `Status model: plan=${normalizedStatusModel.plan_status}, run=${normalizedStatusModel.run_status}, artifact=${normalizedStatusModel.artifact_status}, signals=${normalizedStatusModel.signal_status}, deployment=${normalizedStatusModel.deployment_status}`]
         : fallback.archiveRecord.entries,
+      previousHash: fallback.archiveRecord.previousHash,
+      recordHash: fallback.archiveRecord.recordHash,
     },
     nextAction: typeof data?.nextAction === "string" && data.nextAction.trim() ? data.nextAction.trim() : fallback.nextAction,
   };
@@ -1982,14 +2069,18 @@ function addEvent(type: string, message: string, metadata?: any) {
     type,
     message,
     timestamp: new Date().toISOString(),
-    metadata
+    metadata,
   };
+  const latestEvent = [...events].sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())[0];
+  event.previousHash = latestEvent?.recordHash || null;
+  event.recordHash = computeEventHash(event);
   events.push(event);
   persistState();
   broadcast({ type: 'event', data: event });
 }
 
 function persistArchiveRecord(artifact: RunArtifact) {
+  const latestArchiveRecord = [...archiveRecords].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
   const record: PersistedArchiveRecord = {
     recordId: artifact.archiveRecord.recordId,
     runId: artifact.runId,
@@ -1999,7 +2090,11 @@ function persistArchiveRecord(artifact: RunArtifact) {
     deploymentStatus: artifact.statusModel.deployment_status,
     summary: artifact.archiveRecord.summary,
     entries: artifact.archiveRecord.entries,
+    previousHash: latestArchiveRecord?.recordHash || null,
   };
+  record.recordHash = computeArchiveHash(record);
+  artifact.archiveRecord.previousHash = record.previousHash;
+  artifact.archiveRecord.recordHash = record.recordHash;
 
   archiveRecords = [
     record,
@@ -2041,6 +2136,7 @@ function buildReplayRecord(run: Run, plan: Plan, artifact: RunArtifact): ReplayR
   const relatedEvents = events
     .filter((event) => event.metadata?.runId === run.id || event.metadata?.planId === plan.id)
     .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime());
+  const replayGeneratedAt = new Date().toISOString();
 
   const checkpoints: ReplayRecord["checkpoints"] = [
     {
@@ -2066,12 +2162,24 @@ function buildReplayRecord(run: Run, plan: Plan, artifact: RunArtifact): ReplayR
       referenceId: artifact.archiveRecord.recordId,
       timestamp: artifact.generatedAt,
       summary: artifact.archiveRecord.summary,
+      previousHash: artifact.archiveRecord.previousHash || null,
+      recordHash: artifact.archiveRecord.recordHash,
     },
     {
       stage: "replay",
       referenceId: `replay-${run.id}`,
-      timestamp: new Date().toISOString(),
+      timestamp: replayGeneratedAt,
       summary: `Replay reconstructed from plan ${plan.id}, run ${run.id}, ${relatedEvents.length} event(s), and archive record ${artifact.archiveRecord.recordId}.`,
+      previousHash: artifact.archiveRecord.recordHash || null,
+      recordHash: sha256Hex(stableStringify({
+        replayId: `replay-${run.id}`,
+        planId: plan.id,
+        runId: run.id,
+        archiveRecordId: artifact.archiveRecord.recordId,
+        generatedAt: replayGeneratedAt,
+        eventCount: relatedEvents.length,
+        previousHash: artifact.archiveRecord.recordHash || null,
+      })),
     },
   ];
 
@@ -2080,7 +2188,7 @@ function buildReplayRecord(run: Run, plan: Plan, artifact: RunArtifact): ReplayR
     planId: plan.id,
     runId: run.id,
     archiveRecordId: artifact.archiveRecord.recordId,
-    generatedAt: new Date().toISOString(),
+    generatedAt: replayGeneratedAt,
     claimLevel: artifact.statusModel.claim_level,
     checkpoints,
   };
