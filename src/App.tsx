@@ -50,6 +50,27 @@ interface Plan {
     edges: Array<{ from: string; to: string }>;
   };
   status: string;
+  research?: {
+    query: string;
+    topics: Array<{
+      topic: string;
+      relationship: string;
+      researchText: string;
+      evidence: string[];
+      sourceSignalIds: string[];
+      sourceSignalTitles: string[];
+    }>;
+    synthesis: string;
+    sourceSignals: Array<{
+      id: string;
+      title: string;
+      strength: number;
+      category: string;
+    }>;
+    generatedAt: string;
+    provider: string;
+    mode: "llm" | "fallback";
+  };
   createdAt: string;
 }
 
@@ -1196,6 +1217,45 @@ export default function App() {
                   <p className="text-sm text-white/80 leading-relaxed">{selectedPlan.intent}</p>
                 </div>
 
+                {selectedPlan.research && (
+                  <ArtifactSection title="Research Dossier">
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-2 gap-4 text-[10px] font-mono uppercase tracking-[0.25em] text-white/35">
+                        <div className="border border-white/10 p-4 bg-white/[0.02]">
+                          <div>Provider</div>
+                          <div className="mt-2 text-white/70 normal-case tracking-normal">{selectedPlan.research.provider}</div>
+                        </div>
+                        <div className="border border-white/10 p-4 bg-white/[0.02]">
+                          <div>Mode</div>
+                          <div className="mt-2 text-white/70 normal-case tracking-normal">{selectedPlan.research.mode}</div>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/35 mb-2">Synthesis</div>
+                        <p className="text-sm text-white/78 leading-relaxed">{selectedPlan.research.synthesis}</p>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/35">Topics</div>
+                        {selectedPlan.research.topics.map((topic, index) => (
+                          <div key={`${topic.topic}-${index}`} className="border border-white/10 p-4 bg-white/[0.02]">
+                            <div className="text-sm font-mono uppercase text-blue-200">{topic.topic}</div>
+                            <div className="mt-2 text-xs text-white/45 uppercase tracking-[0.2em]">{topic.relationship}</div>
+                            <p className="mt-3 text-sm text-white/75 leading-relaxed">{topic.researchText}</p>
+                            {topic.evidence.length > 0 && (
+                              <div className="mt-3 space-y-1">
+                                <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-white/35">Evidence</div>
+                                {topic.evidence.map((entry, evidenceIndex) => (
+                                  <p key={`${entry}-${evidenceIndex}`} className="text-sm text-white/65 leading-relaxed">{entry}</p>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </ArtifactSection>
+                )}
+
                 <div className="grid grid-cols-2 gap-4 text-[10px] font-mono uppercase tracking-[0.25em] text-white/35">
                   <div className="border border-white/10 p-4">
                     <div>Created</div>
@@ -1238,6 +1298,16 @@ export default function App() {
 
               <div className="p-6 space-y-3">
                 <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Raw Schema</span>
+                {selectedPlan.research && (
+                  <div className="border border-white/10 p-4 bg-white/[0.02] space-y-3">
+                    <div className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Source Signals</div>
+                    {selectedPlan.research.sourceSignals.map((signal, index) => (
+                      <div key={`${signal.id}-${index}`} className="text-sm text-white/70 leading-relaxed">
+                        {signal.id} · {signal.title} · {signal.category} · {signal.strength}%
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <pre className="text-xs text-white/70 bg-black/60 border border-white/10 p-4 overflow-auto whitespace-pre-wrap break-all">
                   {JSON.stringify(selectedPlan, null, 2)}
                 </pre>

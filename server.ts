@@ -18,6 +18,30 @@ interface SSRNSignal {
   category: string;
 }
 
+interface ResearchTopic {
+  topic: string;
+  relationship: string;
+  researchText: string;
+  evidence: string[];
+  sourceSignalIds: string[];
+  sourceSignalTitles: string[];
+}
+
+interface ResearchDossier {
+  query: string;
+  topics: ResearchTopic[];
+  synthesis: string;
+  sourceSignals: Array<{
+    id: string;
+    title: string;
+    strength: number;
+    category: string;
+  }>;
+  generatedAt: string;
+  provider: ModelProvider;
+  mode: "llm" | "fallback";
+}
+
 const parser = new XMLParser();
 
 let ssrnSignals: SSRNSignal[] = [];
@@ -107,6 +131,7 @@ interface Plan {
   revision: number;
   status: 'draft' | 'verified' | 'locked';
   graph: any;
+  research?: ResearchDossier;
   createdAt: string;
 }
 
@@ -816,12 +841,295 @@ function parseJsonText(text: string) {
   return JSON.parse(cleanModelText(text));
 }
 
-function buildCompilePlanPrompt(intent: string) {
+function getResearchTopicCount() {
+  const parsed = Number(process.env.RESEARCH_TOPIC_COUNT || "3");
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(5, Math.max(2, Math.floor(parsed))) : 3;
+}
+
+function tokenizeIntent(intent: string) {
+  return Array.from(new Set(
+    intent
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 4)
+  ));
+}
+
+function scoreSignalAgainstQuery(signal: SSRNSignal, corpus: string) {
+  const normalizedCorpus = corpus.toLowerCase();
+  const title = signal.title.toLowerCase();
+  const category = signal.category.toLowerCase();
+  let score = signal.strength / 10;
+
+  for (const token of tokenizeIntent(normalizedCorpus)) {
+    if (title.includes(token)) {
+      score += 3.5;
+    } else if (category.includes(token)) {
+      score += 1.5;
+    }
+  }
+
+  if (/risk|policy|governance|control|evaluation/.test(normalizedCorpus) && /risk|policy|control|governance|evaluation/.test(title)) {
+    score += 2;
+  }
+
+  if (/plan|execution|operate|workflow|run/.test(normalizedCorpus) && /agent|optimization|control|evaluation/.test(title)) {
+    score += 1.5;
+  }
+
+  return score;
+}
+
+function selectRelevantSignals(query: string, limit = 3) {
+  return [...ssrnSignals]
+    .sort((left, right) => (
+      scoreSignalAgainstQuery(right, query) - scoreSignalAgainstQuery(left, query)
+    ))
+    .slice(0, limit);
+}
+
+function createFallbackResearchTopics(intent: string): ResearchTopic[] {
+  const topicCount = getResearchTopicCount();
+  const normalizedIntent = intent.trim().replace(/\s+/g, " ");
+  const signals = selectRelevantSignals(intent, topicCount);
+  const timelineMode = /7[- ]?day|today|72 hours|day 7/i.test(intent);
+  const fallbackDefinitions = timelineMode
+    ? [
+        {
+          topic: "Immediate operating scope",
+          relationship: "Defines the concrete work that must start today.",
+          researchText: `Break the directive into today-owned deliverables, evidence checkpoints, and operator assignments for ${normalizedIntent}.`,
+        },
+        {
+          topic: "72-hour execution governance",
+          relationship: "Controls the near-term dependency, compliance, and escalation path.",
+          researchText: "Sequence the next 72 hours around owner accountability, archive evidence, and blocked dependency review.",
+        },
+        {
+          topic: "Day-7 command-center package",
+          relationship: "Converts the directive into a week-one operating outcome with audit coverage.",
+          researchText: "Define the day-7 review package, unresolved risks, archive artifacts, and command-center signals required to keep the mission live.",
+        },
+      ]
+    : [
+        {
+          topic: "Directive decomposition",
+          relationship: "Turns the input into explicit execution stages.",
+          researchText: `Identify the concrete execution stages, dependencies, and outputs required to fulfill ${normalizedIntent}.`,
+        },
+        {
+          topic: "Risk and policy controls",
+          relationship: "Constrains the plan so it can run safely inside the control plane.",
+          researchText: "Map the directive to governance checkpoints, evidence requirements, and escalation triggers.",
+        },
+        {
+          topic: "Run contract and artifact design",
+          relationship: "Defines what the finished operating artifact must contain.",
+          researchText: "Specify the run contract, final outputs, and archive record structure needed for a usable deterministic artifact.",
+        },
+      ];
+
+  return fallbackDefinitions.slice(0, topicCount).map((definition, index) => {
+    const supportingSignals = signals.slice(index, index + 2);
+    return {
+      topic: definition.topic,
+      relationship: definition.relationship,
+      researchText: definition.researchText,
+      evidence: supportingSignals.map((signal) => `${signal.title} (${signal.id})`),
+      sourceSignalIds: supportingSignals.map((signal) => signal.id),
+      sourceSignalTitles: supportingSignals.map((signal) => signal.title),
+    };
+  });
+}
+
+function normalizeResearchTopics(data: any, intent: string) {
+  const fallback = createFallbackResearchTopics(intent);
+  const rawTopics = Array.isArray(data?.topics) ? data.topics : [];
+  const normalizedTopics = rawTopics
+    .map((entry: any, index: number) => {
+      const topic = typeof entry?.topic === "string" ? entry.topic.trim() : "";
+      if (!topic) {
+        return null;
+      }
+
+      const relationship = typeof entry?.relationship === "string" && entry.relationship.trim()
+        ? entry.relationship.trim()
+        : fallback[index]?.relationship || "Supports the directive.";
+
+      return {
+        topic,
+        relationship,
+      };
+    })
+    .filter(Boolean);
+
+  return normalizedTopics.length > 0
+    ? normalizedTopics
+    : fallback.map(({ topic, relationship }) => ({ topic, relationship }));
+}
+
+function normalizeTopicResearch(data: any, fallback: ResearchTopic) {
+  const researchText = typeof data?.researchText === "string" && data.researchText.trim()
+    ? data.researchText.trim()
+    : fallback.researchText;
+
+  const evidence = Array.isArray(data?.evidence) && data.evidence.length > 0
+    ? data.evidence.map(String)
+    : fallback.evidence;
+
+  return {
+    ...fallback,
+    researchText,
+    evidence,
+  };
+}
+
+function createFallbackResearchSynthesis(intent: string, topics: ResearchTopic[]) {
+  const topicSummary = topics
+    .map((topic) => `${topic.topic}: ${topic.relationship}`)
+    .join(" ");
+
+  return `Research synthesis for "${intent}": ${topicSummary} The compiled plan must preserve concrete owners, policy checkpoints, archive evidence, and prompt-dependent phase outputs rather than generic workflow filler.`;
+}
+
+function buildTopicGenerationPrompt(intent: string) {
+  return `
+    You are a deterministic research planner.
+    Decompose the user's directive into ${getResearchTopicCount()} distinct research topics that will improve the quality of the operating plan.
+
+    Directive: "${intent}"
+
+    Return only JSON with this shape:
+    {
+      "topics": [
+        {
+          "topic": "string",
+          "relationship": "How this topic supports the directive"
+        }
+      ]
+    }
+  `;
+}
+
+function buildTopicResearchPrompt(intent: string, topic: { topic: string; relationship: string }, signals: SSRNSignal[]) {
+  return `
+    You are a deterministic topic researcher.
+    Expand the topic into concrete findings that improve a plan compiler.
+
+    Directive: "${intent}"
+    Topic: "${topic.topic}"
+    Relationship: "${topic.relationship}"
+    Supporting research signals:
+    ${signals.map((signal) => `- ${signal.id}: ${signal.title} [${signal.category}] score=${signal.strength}`).join("\n") || "- No external signals available"}
+
+    Return only JSON with this shape:
+    {
+      "researchText": "A concise, concrete research brief for this topic.",
+      "evidence": ["Specific evidence line", "Specific evidence line"]
+    }
+  `;
+}
+
+function buildResearchSynthesisPrompt(intent: string, topics: ResearchTopic[]) {
+  return `
+    You are a research synthesizer.
+    Merge the topic findings into a single research dossier that can be passed into a plan compiler.
+
+    Directive: "${intent}"
+    Topic findings: ${JSON.stringify(topics)}
+
+    Return only JSON with this shape:
+    {
+      "synthesis": "A prompt-dependent research synthesis that names the plan shape, key risks, policy constraints, evidence expectations, and artifact sections that must appear."
+    }
+  `;
+}
+
+async function buildResearchDossier(intent: string): Promise<ResearchDossier> {
+  const fallbackTopics = createFallbackResearchTopics(intent);
+  const sourceSignals = selectRelevantSignals(intent, Math.max(getResearchTopicCount(), 3));
+
+  try {
+    const topicGeneration = await generateModelText(buildTopicGenerationPrompt(intent), true, "plan_compile");
+    const generatedTopics = normalizeResearchTopics(parseJsonText(topicGeneration.text), intent);
+
+    const researchedTopics = await Promise.all(generatedTopics.map(async (topic, index) => {
+      const topicSignals = selectRelevantSignals(`${intent} ${topic.topic} ${topic.relationship}`, 2);
+      const fallbackTopic: ResearchTopic = {
+        topic: topic.topic,
+        relationship: topic.relationship,
+        researchText: fallbackTopics[index]?.researchText || `Research ${topic.topic} for ${intent}.`,
+        evidence: topicSignals.map((signal) => `${signal.title} (${signal.id})`),
+        sourceSignalIds: topicSignals.map((signal) => signal.id),
+        sourceSignalTitles: topicSignals.map((signal) => signal.title),
+      };
+
+      try {
+        const researched = await generateModelText(buildTopicResearchPrompt(intent, topic, topicSignals), true, "plan_compile");
+        return normalizeTopicResearch(parseJsonText(researched.text), fallbackTopic);
+      } catch (error) {
+        console.error(`Research topic error for ${topic.topic}:`, error);
+        return fallbackTopic;
+      }
+    }));
+
+    let synthesis = createFallbackResearchSynthesis(intent, researchedTopics);
+
+    try {
+      const synthesisResult = await generateModelText(buildResearchSynthesisPrompt(intent, researchedTopics), true, "plan_compile");
+      const parsed = parseJsonText(synthesisResult.text);
+      if (typeof parsed?.synthesis === "string" && parsed.synthesis.trim()) {
+        synthesis = parsed.synthesis.trim();
+      }
+    } catch (error) {
+      console.error("Research synthesis error:", error);
+    }
+
+    return {
+      query: intent,
+      topics: researchedTopics,
+      synthesis,
+      sourceSignals: sourceSignals.map((signal) => ({
+        id: signal.id,
+        title: signal.title,
+        strength: signal.strength,
+        category: signal.category,
+      })),
+      generatedAt: new Date().toISOString(),
+      provider: topicGeneration.provider,
+      mode: "llm",
+    };
+  } catch (error) {
+    console.error("Research dossier error:", error);
+    return {
+      query: intent,
+      topics: fallbackTopics,
+      synthesis: createFallbackResearchSynthesis(intent, fallbackTopics),
+      sourceSignals: sourceSignals.map((signal) => ({
+        id: signal.id,
+        title: signal.title,
+        strength: signal.strength,
+        category: signal.category,
+      })),
+      generatedAt: new Date().toISOString(),
+      provider: "fallback",
+      mode: "fallback",
+    };
+  }
+}
+
+function buildCompilePlanPrompt(intent: string, research: ResearchDossier) {
   return `
     You are the Quantum UACP Deterministic Orchestrator.
     Translate the user's intent into a hybrid quantum-classical orchestration plan.
 
     User intent: "${intent}"
+    Research dossier synthesis: "${research.synthesis}"
+    Research topics:
+    ${research.topics.map((topic, index) => `${index + 1}. ${topic.topic} | ${topic.relationship} | ${topic.researchText}`).join("\n")}
+    Supporting signals:
+    ${research.sourceSignals.map((signal) => `- ${signal.id}: ${signal.title} [${signal.category}] score=${signal.strength}`).join("\n") || "- None"}
 
     Requirements:
     - Decode the actual task deeply. Do not return generic placeholder nodes.
@@ -857,6 +1165,8 @@ function buildArtifactPrompt(plan: Plan, run: Run) {
     Run ID: ${run.id}
     Original intent: "${plan.intent}"
     Plan graph: ${JSON.stringify(plan.graph)}
+    Research dossier synthesis: "${plan.research?.synthesis || ""}"
+    Research topics: ${JSON.stringify(plan.research?.topics || [])}
     Current research signals: ${ssrnSignals.map((signal) => signal.title).join(", ")}
     Current market state: ${marketConvergence.map((entry) => `${entry.label}: ${entry.value}`).join(", ")}
 
@@ -1059,20 +1369,27 @@ function normalizeCompiledPlan(planData: any, intent: string) {
   };
 }
 
-async function compilePlanDraft(intent: string): Promise<{ plan: ReturnType<typeof normalizeCompiledPlan>; provider: ModelProvider }> {
+async function compilePlanDraft(intent: string): Promise<{
+  plan: ReturnType<typeof normalizeCompiledPlan>;
+  provider: ModelProvider;
+  research: ResearchDossier;
+}> {
   const fallbackPlan = createFallbackPlanDraft(intent);
+  const research = await buildResearchDossier(intent);
 
   try {
-    const result = await generateModelText(buildCompilePlanPrompt(intent), true, "plan_compile");
+    const result = await generateModelText(buildCompilePlanPrompt(intent, research), true, "plan_compile");
     return {
       plan: normalizeCompiledPlan(parseJsonText(result.text), intent),
       provider: result.provider,
+      research,
     };
   } catch (error) {
     console.error("Plan compilation error:", error);
     return {
       plan: fallbackPlan,
       provider: "fallback",
+      research,
     };
   }
 }
@@ -1216,7 +1533,7 @@ async function generateRunArtifact(plan: Plan, run: Run): Promise<{ artifact: Ru
   }
 }
 
-function createPlanRecord(name: string, intent: string, graph: any): Plan {
+function createPlanRecord(name: string, intent: string, graph: any, research?: ResearchDossier): Plan {
   return {
     id: `p-${Math.random().toString(36).substring(2, 9)}`,
     name: name || "AI Generated Plan",
@@ -1224,6 +1541,7 @@ function createPlanRecord(name: string, intent: string, graph: any): Plan {
     revision: 1,
     status: "draft",
     graph: graph || { nodes: [], edges: [] },
+    research,
     createdAt: new Date().toISOString(),
   };
 }
@@ -1307,6 +1625,19 @@ async function startServer() {
 
     res.json(plan);
   });
+
+  app.get("/api/plans/:planId/research", (req, res) => {
+    const plan = plans.find((entry) => entry.id === req.params.planId);
+    if (!plan) {
+      return res.status(404).json({ error: "Plan not found" });
+    }
+
+    if (!plan.research) {
+      return res.status(404).json({ error: "Research dossier not available" });
+    }
+
+    res.json(plan.research);
+  });
   
   app.post("/api/plans", (req, res) => {
     const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
@@ -1315,7 +1646,7 @@ async function startServer() {
 
     if (!intent) return res.status(400).json({ error: "Intent required" });
 
-    const newPlan = createPlanRecord(name, intent, graph);
+    const newPlan = createPlanRecord(name, intent, graph, undefined);
     
     plans.push(newPlan);
     addEvent('PLAN_CREATED', `New plan created: ${newPlan.id} (${newPlan.name})`, { planId: newPlan.id });
@@ -1335,12 +1666,20 @@ async function startServer() {
 
     try {
       const compiledPlan = await compilePlanDraft(intent);
-      const newPlan = createPlanRecord(compiledPlan.plan.name, intent, compiledPlan.plan.graph);
+      const newPlan = createPlanRecord(
+        compiledPlan.plan.name,
+        intent,
+        compiledPlan.plan.graph,
+        compiledPlan.research
+      );
 
       plans.push(newPlan);
       addEvent("PLAN_CREATED", `New plan created: ${newPlan.id} (${newPlan.name})`, {
         planId: newPlan.id,
         source: compiledPlan.provider,
+        researchProvider: compiledPlan.research.provider,
+        researchMode: compiledPlan.research.mode,
+        researchTopics: compiledPlan.research.topics.length,
       });
 
       res.status(201).json(newPlan);
@@ -1423,7 +1762,15 @@ async function startServer() {
       typeof node?.policy_tag === "string" && node.policy_tag.trim()
     )).length;
     const providerReadiness = getConfiguredProviders().length > 0 ? 1 : 0.7;
-    const researchReadiness = ssrnSignals.length > 0 ? 1 : 0.5;
+    const researchCoverage = referencePlan?.research
+      ? clamp01(
+          0.45 +
+          ((referencePlan.research.topics.length / Math.max(1, getResearchTopicCount())) * 0.3) +
+          (referencePlan.research.synthesis ? 0.15 : 0) +
+          (referencePlan.research.sourceSignals.length > 0 ? 0.1 : 0)
+        )
+      : 0;
+    const researchReadiness = Math.max(ssrnSignals.length > 0 ? 1 : 0.5, researchCoverage);
     const persistenceReadiness = (plans.length > 0 || runs.length > 0 || existsSync(DATA_FILE_PATH)) ? 1 : 0.5;
     const marketReadiness = marketConvergence.length > 0 ? 1 : 0.6;
     const systemPrimeReadiness = clamp01(
