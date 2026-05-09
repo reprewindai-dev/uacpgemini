@@ -1,14 +1,16 @@
 import "dotenv/config";
+import crypto from "crypto";
 import { spawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
-import { createServer } from "http";
+import { createServer, type IncomingMessage } from "http";
 import path from "path";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import { XMLParser } from "fast-xml-parser";
+import { Pool } from "pg";
 
 interface SSRNSignal {
   id: string;
@@ -241,6 +243,12 @@ interface ReplayRecord {
   }>;
 }
 
+interface SessionStatusResponse {
+  authenticated: boolean;
+  authRequired: boolean;
+  authMode: "disabled" | "cookie_session";
+}
+
 type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
 type ModelOperation = "plan_compile" | "artifact_compile";
 
@@ -281,10 +289,28 @@ let observabilityTelemetry: ObservabilityTelemetry = {
 let ollamaProcess: ChildProcess | null = null;
 let ollamaBootstrapPromise: Promise<void> | null = null;
 let ollamaReady = false;
-const DATA_FILE_PATH = process.env.DATA_FILE_PATH?.trim() || path.join(process.cwd(), "data", "uacp-state.json");
+const DEFAULT_RENDER_DATA_DIR = "/var/data";
+const DATA_FILE_PATH = process.env.DATA_FILE_PATH?.trim()
+  || (existsSync(DEFAULT_RENDER_DATA_DIR) ? path.join(DEFAULT_RENDER_DATA_DIR, "uacp-state.json") : path.join(process.cwd(), "data", "uacp-state.json"));
+const SESSION_COOKIE_NAME = "uacp_session";
+const AUTH_PASSCODE = process.env.OPERATOR_PASSCODE?.trim() || "";
+const AUTH_SESSION_SECRET = process.env.AUTH_SESSION_SECRET?.trim() || "";
+let persistencePool: Pool | null = null;
+let persistenceMode: "file" | "postgres" = "file";
+let persistQueue: Promise<void> = Promise.resolve();
 
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
+}
+
+function buildAppStateSnapshot(): AppState {
+  return {
+    plans,
+    runs,
+    events,
+    archiveRecords,
+    observabilityTelemetry,
+  };
 }
 
 function clamp01(value: number) {
@@ -298,21 +324,146 @@ function ensureDataFileDirectory() {
   }
 }
 
-function persistState() {
-  ensureDataFileDirectory();
-
-  const state: AppState = {
-    plans,
-    runs,
-    events,
-    archiveRecords,
-    observabilityTelemetry,
-  };
-
-  writeFileSync(DATA_FILE_PATH, JSON.stringify(state, null, 2), "utf8");
+function isAuthConfigured() {
+  return AUTH_PASSCODE.length > 0 && AUTH_SESSION_SECRET.length > 0;
 }
 
-function loadPersistedState() {
+function getAuthMode(): SessionStatusResponse["authMode"] {
+  return isAuthConfigured() ? "cookie_session" : "disabled";
+}
+
+function getCookieValue(cookieHeader: string | undefined, name: string) {
+  if (!cookieHeader) {
+    return null;
+  }
+
+  const pairs = cookieHeader.split(";").map((entry) => entry.trim());
+  for (const pair of pairs) {
+    const [key, ...rest] = pair.split("=");
+    if (key === name) {
+      return rest.join("=");
+    }
+  }
+
+  return null;
+}
+
+function createSessionToken() {
+  const expiresAt = Date.now() + (1000 * 60 * 60 * 12);
+  const payload = Buffer.from(JSON.stringify({ exp: expiresAt }), "utf8").toString("base64url");
+  const signature = crypto.createHmac("sha256", AUTH_SESSION_SECRET).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifySessionToken(token: string | null) {
+  if (!isAuthConfigured() || !token) {
+    return !isAuthConfigured();
+  }
+
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) {
+    return false;
+  }
+
+  const expected = crypto.createHmac("sha256", AUTH_SESSION_SECRET).update(payload).digest("base64url");
+  if (signature !== expected) {
+    return false;
+  }
+
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: number };
+    return typeof decoded.exp === "number" && decoded.exp > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function isRequestAuthenticated(request: IncomingMessage | express.Request) {
+  if (!isAuthConfigured()) {
+    return true;
+  }
+
+  const token = getCookieValue(request.headers.cookie, SESSION_COOKIE_NAME);
+  return verifySessionToken(token);
+}
+
+function setSessionCookie(response: express.Response) {
+  const isProduction = process.env.NODE_ENV === "production";
+  const token = createSessionToken();
+  response.setHeader("Set-Cookie", `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200${isProduction ? "; Secure" : ""}`);
+}
+
+function clearSessionCookie(response: express.Response) {
+  const isProduction = process.env.NODE_ENV === "production";
+  response.setHeader("Set-Cookie", `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isProduction ? "; Secure" : ""}`);
+}
+
+function persistState() {
+  ensureDataFileDirectory();
+  const state = buildAppStateSnapshot();
+  writeFileSync(DATA_FILE_PATH, JSON.stringify(state, null, 2), "utf8");
+
+  if (persistencePool) {
+    persistQueue = persistQueue
+      .then(async () => {
+        await persistencePool?.query(
+          `insert into app_state (state_key, state_json, updated_at)
+           values ($1, $2::jsonb, now())
+           on conflict (state_key)
+           do update set state_json = excluded.state_json, updated_at = now()`,
+          ["uacp", JSON.stringify(state)]
+        );
+      })
+      .catch((error) => {
+        console.error("Postgres state persist error:", error);
+      });
+  }
+}
+
+function applyLoadedState(parsed: Partial<AppState>) {
+  plans = Array.isArray(parsed.plans) ? parsed.plans : [];
+  runs = Array.isArray(parsed.runs) ? parsed.runs.map((run) => {
+    const matchedPlan = plans.find((plan) => plan.id === run.planId);
+    return {
+      ...run,
+      planSnapshot: run.planSnapshot || (matchedPlan ? deepClone(matchedPlan) : undefined),
+    };
+  }) as Run[] : [];
+  events = Array.isArray(parsed.events) ? parsed.events : [];
+  archiveRecords = Array.isArray(parsed.archiveRecords) ? parsed.archiveRecords : [];
+  observabilityTelemetry = parsed.observabilityTelemetry && Array.isArray(parsed.observabilityTelemetry.recentLatencies)
+    ? {
+        recentLatencies: parsed.observabilityTelemetry.recentLatencies
+          .filter((entry): entry is LatencyMeasurement => (
+            typeof entry?.durationMs === "number" &&
+            typeof entry?.provider === "string" &&
+            typeof entry?.operation === "string" &&
+            typeof entry?.recordedAt === "string"
+          ))
+          .slice(0, 20),
+        lastMeasuredLatencyMs: typeof parsed.observabilityTelemetry.lastMeasuredLatencyMs === "number"
+          ? parsed.observabilityTelemetry.lastMeasuredLatencyMs
+          : null,
+        lastMeasuredProvider: typeof parsed.observabilityTelemetry.lastMeasuredProvider === "string"
+          ? parsed.observabilityTelemetry.lastMeasuredProvider as ModelProvider
+          : null,
+        lastMeasuredOperation: typeof parsed.observabilityTelemetry.lastMeasuredOperation === "string"
+          ? parsed.observabilityTelemetry.lastMeasuredOperation as ModelOperation
+          : null,
+        lastMeasuredAt: typeof parsed.observabilityTelemetry.lastMeasuredAt === "string"
+          ? parsed.observabilityTelemetry.lastMeasuredAt
+          : null,
+      }
+    : {
+        recentLatencies: [],
+        lastMeasuredLatencyMs: null,
+        lastMeasuredProvider: null,
+        lastMeasuredOperation: null,
+        lastMeasuredAt: null,
+      };
+}
+
+function loadPersistedStateFromFile() {
   try {
     if (!existsSync(DATA_FILE_PATH)) {
       return;
@@ -324,46 +475,7 @@ function loadPersistedState() {
     }
 
     const parsed = JSON.parse(raw) as Partial<AppState>;
-    plans = Array.isArray(parsed.plans) ? parsed.plans : [];
-    runs = Array.isArray(parsed.runs) ? parsed.runs.map((run) => {
-      const matchedPlan = plans.find((plan) => plan.id === run.planId);
-      return {
-        ...run,
-        planSnapshot: run.planSnapshot || (matchedPlan ? deepClone(matchedPlan) : undefined),
-      };
-    }) as Run[] : [];
-    events = Array.isArray(parsed.events) ? parsed.events : [];
-    archiveRecords = Array.isArray(parsed.archiveRecords) ? parsed.archiveRecords : [];
-    observabilityTelemetry = parsed.observabilityTelemetry && Array.isArray(parsed.observabilityTelemetry.recentLatencies)
-      ? {
-          recentLatencies: parsed.observabilityTelemetry.recentLatencies
-            .filter((entry): entry is LatencyMeasurement => (
-              typeof entry?.durationMs === "number" &&
-              typeof entry?.provider === "string" &&
-              typeof entry?.operation === "string" &&
-              typeof entry?.recordedAt === "string"
-            ))
-            .slice(0, 20),
-          lastMeasuredLatencyMs: typeof parsed.observabilityTelemetry.lastMeasuredLatencyMs === "number"
-            ? parsed.observabilityTelemetry.lastMeasuredLatencyMs
-            : null,
-          lastMeasuredProvider: typeof parsed.observabilityTelemetry.lastMeasuredProvider === "string"
-            ? parsed.observabilityTelemetry.lastMeasuredProvider as ModelProvider
-            : null,
-          lastMeasuredOperation: typeof parsed.observabilityTelemetry.lastMeasuredOperation === "string"
-            ? parsed.observabilityTelemetry.lastMeasuredOperation as ModelOperation
-            : null,
-          lastMeasuredAt: typeof parsed.observabilityTelemetry.lastMeasuredAt === "string"
-            ? parsed.observabilityTelemetry.lastMeasuredAt
-            : null,
-        }
-      : {
-          recentLatencies: [],
-          lastMeasuredLatencyMs: null,
-          lastMeasuredProvider: null,
-          lastMeasuredOperation: null,
-          lastMeasuredAt: null,
-        };
+    applyLoadedState(parsed);
   } catch (error) {
     console.error("State load error:", error);
     plans = [];
@@ -380,7 +492,47 @@ function loadPersistedState() {
   }
 }
 
-loadPersistedState();
+async function initializePersistence() {
+  loadPersistedStateFromFile();
+
+  const connectionString = process.env.DATABASE_URL?.trim();
+  if (!connectionString) {
+    persistenceMode = "file";
+    return;
+  }
+
+  try {
+    persistencePool = new Pool({
+      connectionString,
+      ssl: process.env.DATABASE_SSL?.trim().toLowerCase() === "true"
+        ? { rejectUnauthorized: false }
+        : undefined,
+    });
+
+    await persistencePool.query(`
+      create table if not exists app_state (
+        state_key text primary key,
+        state_json jsonb not null,
+        updated_at timestamptz not null default now()
+      )
+    `);
+
+    const result = await persistencePool.query<{ state_json: AppState }>(
+      "select state_json from app_state where state_key = $1 limit 1",
+      ["uacp"]
+    );
+
+    if (result.rows[0]?.state_json) {
+      applyLoadedState(result.rows[0].state_json);
+    }
+
+    persistenceMode = "postgres";
+  } catch (error) {
+    console.error("Postgres persistence initialization error:", error);
+    persistencePool = null;
+    persistenceMode = "file";
+  }
+}
 
 function getGroqConfig() {
   const apiKey = process.env.GROQ_API_KEY?.trim();
@@ -1902,6 +2054,8 @@ function broadcast(data: any) {
 }
 
 async function startServer() {
+  await initializePersistence();
+
   const app = express();
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ server: httpServer });
@@ -1911,13 +2065,73 @@ async function startServer() {
   app.use(cors());
   app.use(express.json());
 
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, request) => {
+    if (!isRequestAuthenticated(request)) {
+      ws.close(1008, "Authentication required");
+      return;
+    }
+
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'init', message: 'UACP Control Plane Online' }));
     ws.on("close", () => clients.delete(ws));
   });
 
   // --- API Routes ---
+
+  app.get("/api/auth/status", (req, res) => {
+    const authenticated = isRequestAuthenticated(req);
+    const payload: SessionStatusResponse = {
+      authenticated,
+      authRequired: isAuthConfigured(),
+      authMode: getAuthMode(),
+    };
+
+    if (!authenticated) {
+      return res.status(401).json(payload);
+    }
+
+    res.json(payload);
+  });
+
+  app.post("/api/auth/session", (req, res) => {
+    if (!isAuthConfigured()) {
+      return res.json({
+        authenticated: true,
+        authRequired: false,
+        authMode: getAuthMode(),
+      } satisfies SessionStatusResponse);
+    }
+
+    const passcode = typeof req.body?.passcode === "string" ? req.body.passcode : "";
+    if (!passcode || passcode !== AUTH_PASSCODE) {
+      clearSessionCookie(res);
+      return res.status(401).json({ error: "Invalid passcode" });
+    }
+
+    setSessionCookie(res);
+    res.json({
+      authenticated: true,
+      authRequired: true,
+      authMode: getAuthMode(),
+    } satisfies SessionStatusResponse);
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  });
+
+  app.use("/api", (req, res, next) => {
+    if (req.path === "/auth/status" || req.path === "/auth/session" || req.path === "/auth/logout") {
+      return next();
+    }
+
+    if (!isRequestAuthenticated(req)) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+
+    return next();
+  });
 
   app.get("/api/bootstrap", (req, res) => {
     const configuredProviders = getConfiguredProviders();
@@ -1931,6 +2145,8 @@ async function startServer() {
       primaryProviderLabel: formatProviderLabel(getPrimaryProvider()),
       providerChain: configuredProviders.map(formatProviderLabel),
       researchFeedSource: "arXiv",
+      authMode: getAuthMode(),
+      persistenceMode,
     });
   });
 

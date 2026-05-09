@@ -140,6 +140,8 @@ interface BootstrapPayload {
   primaryProviderLabel: string;
   providerChain: string[];
   researchFeedSource: string;
+  authMode?: "disabled" | "cookie_session";
+  persistenceMode?: "file" | "postgres";
 }
 
 interface ReplayRecord {
@@ -176,54 +178,22 @@ export default function App() {
   const [providerChain, setProviderChain] = useState<string[]>([]);
   const [researchFeedSource, setResearchFeedSource] = useState<string>("arXiv");
   const [signalHistory, setSignalHistory] = useState<Record<string, Array<{ val: number }>>>({});
+  const [authRequired, setAuthRequired] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authenticating, setAuthenticating] = useState(false);
+  const [passcode, setPasscode] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authRefreshKey, setAuthRefreshKey] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
   const activePlan = plans[0];
   const latestArtifactRun = runs.find((run) => run.artifact) ?? null;
 
   useEffect(() => {
-    // Initial Bootstrap
-    const fetchData = async () => {
-      try {
-        const [p, r, e, s, o, b] = await Promise.all([
-          fetch("/api/plans").then(res => res.json()),
-          fetch("/api/runs").then(res => res.json()),
-          fetch("/api/events").then(res => res.json()),
-          fetch("/api/ssrn-signals").then(res => res.json()),
-          fetch("/api/observability/signals").then(res => res.json()),
-          fetch("/api/bootstrap").then(res => res.json())
-        ]);
-        setPlans(p);
-        setRuns(r);
-        setEvents(e);
-        setSsrnData(s);
-        setSignals(o);
-        setSignalHistory(buildSignalHistory(o?.horowitz_signals || []));
-        const bootstrap = b as BootstrapPayload;
-        setIdentity(bootstrap.userEmail || "LOCAL_OPERATOR");
-        setProviderLabel(bootstrap.primaryProviderLabel || "Deterministic fallback");
-        setProviderChain(Array.isArray(bootstrap.providerChain) ? bootstrap.providerChain : []);
-        setResearchFeedSource(bootstrap.researchFeedSource || "arXiv");
-      } catch (err) {
-        console.error("Bootstrap error:", err);
-      }
-    };
-    
-    fetchData();
+    let interval: ReturnType<typeof setInterval> | null = null;
 
-    // Signal Polling
-    const interval = setInterval(() => {
-      fetch("/api/observability/signals")
-        .then(res => res.json())
-        .then((nextSignals) => {
-          setSignals(nextSignals);
-          setSignalHistory(prev => appendSignalHistory(prev, nextSignals?.horowitz_signals || []));
-        })
-        .catch(() => {});
-    }, 4000);
-
-    // WebSocket for real-time updates
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
+
     const connectWs = () => {
       socketRef.current = new WebSocket(wsUrl);
       socketRef.current.onmessage = (event) => {
@@ -249,15 +219,98 @@ export default function App() {
           });
         }
       };
-      socketRef.current.onclose = () => setTimeout(connectWs, 3000);
+      socketRef.current.onclose = () => {
+        if (!authRequired) {
+          setTimeout(connectWs, 3000);
+        }
+      };
     };
 
-    connectWs();
+    // Initial Bootstrap
+    const fetchData = async () => {
+      try {
+        const authRes = await fetch("/api/auth/status");
+        if (!authRes.ok) {
+          setAuthRequired(true);
+          setAuthChecked(true);
+          return;
+        }
+
+        setAuthRequired(false);
+        const [p, r, e, s, o, b] = await Promise.all([
+          fetch("/api/plans").then(res => res.json()),
+          fetch("/api/runs").then(res => res.json()),
+          fetch("/api/events").then(res => res.json()),
+          fetch("/api/ssrn-signals").then(res => res.json()),
+          fetch("/api/observability/signals").then(res => res.json()),
+          fetch("/api/bootstrap").then(res => res.json())
+        ]);
+        setPlans(p);
+        setRuns(r);
+        setEvents(e);
+        setSsrnData(s);
+        setSignals(o);
+        setSignalHistory(buildSignalHistory(o?.horowitz_signals || []));
+        const bootstrap = b as BootstrapPayload;
+        setIdentity(bootstrap.userEmail || "LOCAL_OPERATOR");
+        setProviderLabel(bootstrap.primaryProviderLabel || "Deterministic fallback");
+        setProviderChain(Array.isArray(bootstrap.providerChain) ? bootstrap.providerChain : []);
+        setResearchFeedSource(bootstrap.researchFeedSource || "arXiv");
+        setAuthChecked(true);
+        interval = setInterval(() => {
+          fetch("/api/observability/signals")
+            .then(res => res.json())
+            .then((nextSignals) => {
+              setSignals(nextSignals);
+              setSignalHistory(prev => appendSignalHistory(prev, nextSignals?.horowitz_signals || []));
+            })
+            .catch(() => {});
+        }, 4000);
+        connectWs();
+      } catch (err) {
+        console.error("Bootstrap error:", err);
+        setAuthChecked(true);
+      }
+    };
+    
+    fetchData();
     return () => {
-      clearInterval(interval);
+      if (interval) {
+        clearInterval(interval);
+      }
       socketRef.current?.close();
     };
-  }, []);
+  }, [authRefreshKey, authRequired]);
+
+  const handleLogin = async () => {
+    if (!passcode.trim() || authenticating) {
+      return;
+    }
+
+    setAuthenticating(true);
+    setAuthError(null);
+
+    try {
+      const res = await fetch("/api/auth/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passcode: passcode.trim() }),
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload.error || "Authentication failed");
+      }
+
+      setPasscode("");
+      setAuthRequired(false);
+      setAuthRefreshKey((value) => value + 1);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Authentication failed");
+    } finally {
+      setAuthenticating(false);
+    }
+  };
 
   useEffect(() => {
     if (!selectedArtifactRun?.artifact) {
@@ -455,6 +508,41 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col bg-[#050505] text-[#e0e0e0] font-sans selection:bg-blue-500/30 overflow-hidden relative">
       <div className="absolute inset-0 scanner pointer-events-none z-0 opacity-50" />
+      {authChecked && authRequired && (
+        <div className="absolute inset-0 z-[120] bg-black/92 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="w-full max-w-md border border-white/10 bg-[#090909] p-8 shadow-2xl space-y-6">
+            <div className="space-y-2">
+              <div className="text-[10px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Operator Session</div>
+              <h2 className="font-serif italic text-3xl text-white/90">Authenticated Access Required</h2>
+              <p className="text-sm text-white/55 leading-relaxed">
+                Enter the operator passcode to unlock the governed compiler, archive trail, and replay surface.
+              </p>
+            </div>
+            <div className="space-y-3">
+              <input
+                type="password"
+                value={passcode}
+                onChange={(e) => setPasscode(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    void handleLogin();
+                  }
+                }}
+                className="w-full bg-black/80 border border-white/10 px-4 py-3 text-sm text-white/85 focus:outline-none focus:border-blue-500/50"
+                placeholder="Operator passcode"
+              />
+              {authError && <p className="text-sm text-red-300/80">{authError}</p>}
+            </div>
+            <button
+              onClick={() => void handleLogin()}
+              disabled={authenticating || !passcode.trim()}
+              className="w-full px-4 py-3 border border-blue-500/30 bg-blue-500/10 text-[10px] uppercase tracking-[0.35em] font-mono text-blue-100 hover:bg-blue-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {authenticating ? "Authorizing" : "Unlock Control Plane"}
+            </button>
+          </div>
+        </div>
+      )}
       
       {/* Header Navigation */}
       <header className="h-16 border-b border-white/10 flex items-center justify-between px-8 bg-[#0a0a0a] z-50 shadow-2xl relative">

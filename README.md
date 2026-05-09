@@ -33,6 +33,8 @@ Quantum UACP is a runnable full-stack control plane for hybrid workflow orchestr
 - `AI_PROVIDER`, `LLM_PROVIDER`, `AI_FALLBACK_PROVIDER`: provider priority hints.
 - `RESEARCH_TOPIC_COUNT`: number of research topics to generate per compile.
 - `LLM_REQUEST_TIMEOUT_MS`: provider timeout for compile and artifact generation.
+- `OPERATOR_PASSCODE` + `AUTH_SESSION_SECRET`: enable signed operator sessions for the API and websocket surface.
+- `DATABASE_URL`: enables Postgres-backed durable state for plans, runs, events, archive records, and observability telemetry.
 
 ## Research Context
 This control plane compiles plans against live research signals and enforces prompt-dependent outputs so the artifact and archive surfaces expose what was actually generated rather than generic completion text.
