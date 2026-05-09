@@ -185,6 +185,7 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authRefreshKey, setAuthRefreshKey] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
+  const executionViewportRef = useRef<HTMLDivElement | null>(null);
   const activePlan = plans[0];
   const latestArtifactRun = runs.find((run) => run.artifact) ?? null;
 
@@ -323,6 +324,14 @@ export default function App() {
       .then((payload) => setSelectedReplay(payload))
       .catch(() => setSelectedReplay(null));
   }, [selectedArtifactRun]);
+
+  useEffect(() => {
+    if (activeTab !== "execution" || !activePlan || !executionViewportRef.current) {
+      return;
+    }
+
+    executionViewportRef.current.scrollTo({ left: 0, behavior: "auto" });
+  }, [activeTab, activePlan?.id]);
 
   const handleCreatePlan = async () => {
     const trimmedIntent = intent.trim();
@@ -793,9 +802,12 @@ export default function App() {
                   </motion.div>
                 )}
 
-                <div className="flex-1 flex items-center justify-center overflow-auto custom-scrollbar p-12">
+                <div
+                  ref={executionViewportRef}
+                  className="flex-1 overflow-x-auto overflow-y-hidden custom-scrollbar p-12"
+                >
                    {activePlan ? (
-                     <div className="flex items-center gap-12 relative animate-in fade-in duration-700">
+                     <div className="flex min-w-max items-start gap-12 relative animate-in fade-in duration-700">
                         {activePlan.graph?.nodes?.map((node: any, idx: number) => (
                           <div key={`${node.id}-${idx}`} className="relative group shrink-0">
                             <motion.div 
