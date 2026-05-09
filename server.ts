@@ -305,6 +305,52 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getProviderRequestTimeoutMs() {
+  const parsed = Number(process.env.LLM_REQUEST_TIMEOUT_MS || "20000");
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 20000;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, label: string) {
+  const controller = new AbortController();
+  const timeoutMs = getProviderRequestTimeoutMs();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function withTimeout<T>(factory: () => Promise<T>, label: string): Promise<T> {
+  const timeoutMs = getProviderRequestTimeoutMs();
+
+  return await new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    factory()
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
+}
+
 async function isOllamaReachable(baseUrl: string) {
   try {
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}/api/tags`);
@@ -525,7 +571,7 @@ async function requestGroq(prompt: string, expectJson: boolean) {
     throw new Error("Groq is not configured");
   }
 
-  const response = await fetch(`${groq.baseUrl}/chat/completions`, {
+  const response = await fetchWithTimeout(`${groq.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -537,7 +583,7 @@ async function requestGroq(prompt: string, expectJson: boolean) {
       temperature: 0.2,
       response_format: expectJson ? { type: "json_object" } : undefined,
     }),
-  });
+  }, "Groq request");
 
   if (!response.ok) {
     throw new Error(`Groq request failed with status ${response.status}`);
@@ -558,7 +604,7 @@ async function requestHuggingFace(prompt: string, expectJson: boolean) {
     throw new Error("Hugging Face is not configured");
   }
 
-  const response = await fetch(`${huggingFace.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+  const response = await fetchWithTimeout(`${huggingFace.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -570,7 +616,7 @@ async function requestHuggingFace(prompt: string, expectJson: boolean) {
       temperature: 0.2,
       response_format: expectJson ? { type: "json_object" } : undefined,
     }),
-  });
+  }, "Hugging Face request");
 
   if (!response.ok) {
     throw new Error(`Hugging Face request failed with status ${response.status}`);
@@ -593,7 +639,7 @@ async function requestOllama(prompt: string, expectJson: boolean) {
 
   await ensureOllamaReady();
 
-  const response = await fetch(`${normalizeBaseUrl(ollama.baseUrl)}/api/generate`, {
+  const response = await fetchWithTimeout(`${normalizeBaseUrl(ollama.baseUrl)}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -602,7 +648,7 @@ async function requestOllama(prompt: string, expectJson: boolean) {
       stream: false,
       format: expectJson ? "json" : undefined,
     }),
-  });
+  }, "Ollama request");
 
   if (!response.ok) {
     throw new Error(`Ollama request failed with status ${response.status}`);
@@ -624,11 +670,11 @@ async function requestGemini(prompt: string, expectJson: boolean) {
   }
 
   const ai = new GoogleGenAI({ apiKey: gemini.apiKey });
-  const response = await ai.models.generateContent({
+  const response = await withTimeout(() => ai.models.generateContent({
     model: gemini.model,
     contents: prompt,
     config: expectJson ? { responseMimeType: "application/json" } : undefined,
-  });
+  }), "Gemini request");
 
   const text = response.text;
   if (typeof text !== "string" || !text.trim()) {
