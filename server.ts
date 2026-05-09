@@ -1568,12 +1568,16 @@ async function startServer() {
     const latestRunLatencyAt = latestCompletedRun?.endTime
       ? new Date(latestCompletedRun.endTime).getTime()
       : 0;
-    const latency = latestMeasuredTelemetryAt >= latestRunLatencyAt
+    const hasProviderLatency = typeof observabilityTelemetry.lastMeasuredLatencyMs === "number" && latestMeasuredTelemetryAt > 0;
+    const hasRunLatency = typeof latestRunLatency === "number" && latestRunLatencyAt > 0;
+    const latency = hasProviderLatency && (!hasRunLatency || latestMeasuredTelemetryAt >= latestRunLatencyAt)
       ? observabilityTelemetry.lastMeasuredLatencyMs
-      : latestRunLatency;
-    const latencySource = latestMeasuredTelemetryAt >= latestRunLatencyAt
+      : hasRunLatency
+        ? latestRunLatency
+        : null;
+    const latencySource = hasProviderLatency && (!hasRunLatency || latestMeasuredTelemetryAt >= latestRunLatencyAt)
       ? "provider"
-      : latestRunLatency !== null
+      : hasRunLatency
         ? "run"
         : null;
     const stageBoost = observabilityStage === "verified"
