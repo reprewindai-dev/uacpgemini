@@ -273,6 +273,7 @@ interface AppState {
   events: AppEvent[];
   archiveRecords: PersistedArchiveRecord[];
   observabilityTelemetry: ObservabilityTelemetry;
+  publicDemoUsage: Record<string, { planCompiles: number; runStarts: number; updatedAt: string }>;
 }
 
 let plans: Plan[] = [];
@@ -286,6 +287,7 @@ let observabilityTelemetry: ObservabilityTelemetry = {
   lastMeasuredOperation: null,
   lastMeasuredAt: null,
 };
+let publicDemoUsage: AppState["publicDemoUsage"] = {};
 let ollamaProcess: ChildProcess | null = null;
 let ollamaBootstrapPromise: Promise<void> | null = null;
 let ollamaReady = false;
@@ -295,6 +297,7 @@ const DATA_FILE_PATH = process.env.DATA_FILE_PATH?.trim()
 const SESSION_COOKIE_NAME = "uacp_session";
 const AUTH_PASSCODE = process.env.OPERATOR_PASSCODE?.trim() || "";
 const AUTH_SESSION_SECRET = process.env.AUTH_SESSION_SECRET?.trim() || "";
+const PUBLIC_DEMO_ACTION_LIMIT = Number(process.env.UACP_PUBLIC_DEMO_ACTION_LIMIT || "1");
 let persistencePool: Pool | null = null;
 let persistenceMode: "file" | "postgres" = "file";
 let persistQueue: Promise<void> = Promise.resolve();
@@ -310,11 +313,51 @@ function buildAppStateSnapshot(): AppState {
     events,
     archiveRecords,
     observabilityTelemetry,
+    publicDemoUsage,
   };
 }
 
 function clamp01(value: number) {
   return Math.min(1, Math.max(0, value));
+}
+
+function getClientFingerprint(req: express.Request) {
+  const forwardedFor = String(req.headers["x-forwarded-for"] || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)[0];
+  const ip = String(req.headers["cf-connecting-ip"] || forwardedFor || req.ip || req.socket.remoteAddress || "unknown");
+  const salt = process.env.UACP_DEMO_RATE_SALT || "uacp-public-demo-v1";
+  return crypto.createHash("sha256").update(`${salt}:${ip}`).digest("hex").slice(0, 32);
+}
+
+function getDemoUsage(req: express.Request) {
+  const key = getClientFingerprint(req);
+  if (!publicDemoUsage[key]) {
+    publicDemoUsage[key] = { planCompiles: 0, runStarts: 0, updatedAt: new Date().toISOString() };
+  }
+  return { key, usage: publicDemoUsage[key] };
+}
+
+function demoLimitExceeded(action: "planCompiles" | "runStarts", usage: AppState["publicDemoUsage"][string]) {
+  return PUBLIC_DEMO_ACTION_LIMIT >= 0 && usage[action] >= PUBLIC_DEMO_ACTION_LIMIT;
+}
+
+function markDemoUsage(action: "planCompiles" | "runStarts", key: string) {
+  const usage = publicDemoUsage[key] || { planCompiles: 0, runStarts: 0, updatedAt: new Date().toISOString() };
+  usage[action] += 1;
+  usage.updatedAt = new Date().toISOString();
+  publicDemoUsage[key] = usage;
+}
+
+function sendDemoLimit(res: express.Response, action: "planCompiles" | "runStarts") {
+  const noun = action === "planCompiles" ? "plan compile" : "governed execution";
+  return res.status(429).json({
+    error: `Public demo limit reached for this IP. You already used your ${noun}. Start a Free Evaluation to continue with your own workspace.`,
+    code: "PUBLIC_DEMO_LIMIT_REACHED",
+    limit: PUBLIC_DEMO_ACTION_LIMIT,
+    action,
+  });
 }
 
 function ensureDataFileDirectory() {
@@ -431,6 +474,7 @@ function applyLoadedState(parsed: Partial<AppState>) {
   }) as Run[] : [];
   events = Array.isArray(parsed.events) ? parsed.events : [];
   archiveRecords = Array.isArray(parsed.archiveRecords) ? parsed.archiveRecords : [];
+  publicDemoUsage = parsed.publicDemoUsage || {};
   observabilityTelemetry = parsed.observabilityTelemetry && Array.isArray(parsed.observabilityTelemetry.recentLatencies)
     ? {
         recentLatencies: parsed.observabilityTelemetry.recentLatencies
@@ -2062,6 +2106,7 @@ async function startServer() {
 
   const PORT = Number(process.env.PORT || "3000");
 
+  app.set("trust proxy", true);
   app.use(cors());
   app.use(express.json());
 
@@ -2189,6 +2234,11 @@ async function startServer() {
   });
 
   app.post("/api/plans/compile", async (req, res) => {
+    const { key, usage } = getDemoUsage(req);
+    if (demoLimitExceeded("planCompiles", usage)) {
+      return sendDemoLimit(res, "planCompiles");
+    }
+
     const intent = typeof req.body?.intent === "string" ? req.body.intent.trim() : "";
 
     if (!intent) {
@@ -2210,6 +2260,7 @@ async function startServer() {
       );
 
       plans.push(newPlan);
+      markDemoUsage("planCompiles", key);
       addEvent("PLAN_CREATED", `New plan created: ${newPlan.id} (${newPlan.name})`, {
         planId: newPlan.id,
         source: compiledPlan.provider,
@@ -2277,12 +2328,18 @@ async function startServer() {
   });
 
   app.post("/api/runs", (req, res) => {
+    const { key, usage } = getDemoUsage(req);
+    if (demoLimitExceeded("runStarts", usage)) {
+      return sendDemoLimit(res, "runStarts");
+    }
+
     const { planId } = req.body;
     const plan = plans.find(p => p.id === planId);
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
     const newRun = createRunRecord(plan);
     runs.push(newRun);
+    markDemoUsage("runStarts", key);
     addEvent('RUN_STARTED', `Execution run started for plan ${planId}`, { runId: newRun.id, planId });
     
     // Simulate execution
