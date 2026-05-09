@@ -2192,6 +2192,8 @@ async function startServer() {
       researchFeedSource: "arXiv",
       authMode: getAuthMode(),
       persistenceMode,
+      publicDemoLimit: PUBLIC_DEMO_ACTION_LIMIT,
+      publicDemoLimitMode: "client_ip_fingerprint",
     });
   });
 
