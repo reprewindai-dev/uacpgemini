@@ -366,6 +366,50 @@ export default function App() {
     }
   };
 
+  const fetchReplay = async (runId: string) => {
+    const res = await fetch(`/api/runs/${runId}/replay`);
+    if (!res.ok) {
+      throw new Error("Replay is not ready yet");
+    }
+
+    return await res.json() as ReplayRecord;
+  };
+
+  const openReplay = async (run: Run) => {
+    try {
+      const replay = await fetchReplay(run.id);
+      setSelectedReplay(replay);
+      if (!selectedArtifactRun || selectedArtifactRun.id !== run.id) {
+        setSelectedArtifactRun(run);
+      }
+      setExportMessage("Replay loaded");
+    } catch (error) {
+      console.error("Replay load error:", error);
+      setExportMessage(error instanceof Error ? error.message : "Replay unavailable");
+    }
+  };
+
+  const downloadReplay = async (run: Run) => {
+    try {
+      const replay = await fetchReplay(run.id);
+      const blob = new Blob([JSON.stringify(replay, null, 2)], {
+        type: "application/json",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${replay.replayId}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      setExportMessage("Replay downloaded");
+    } catch (error) {
+      console.error("Replay export error:", error);
+      setExportMessage(error instanceof Error ? error.message : "Replay export failed");
+    }
+  };
+
   const handleExportSchema = () => {
     if (!activePlan) {
       setExportMessage("No plan available to export");
@@ -847,6 +891,20 @@ export default function App() {
                                 >
                                   Download Artifact
                                 </button>
+                                <button
+                                  onClick={() => openReplay(run)}
+                                  disabled={!run.artifact}
+                                  className="text-[9px] font-mono uppercase tracking-[0.3em] text-cyan-300 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  Open Replay
+                                </button>
+                                <button
+                                  onClick={() => downloadReplay(run)}
+                                  disabled={!run.artifact}
+                                  className="text-[9px] font-mono uppercase tracking-[0.3em] text-white/40 hover:text-cyan-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  Download Replay
+                                </button>
                               </div>
                           </div>
                           <div className="text-right">
@@ -1083,6 +1141,18 @@ export default function App() {
                   className="px-4 py-2 border border-purple-500/20 text-[10px] uppercase tracking-[0.3em] font-mono text-purple-200 hover:bg-purple-500/10 transition-colors"
                 >
                   Download Artifact
+                </button>
+                <button
+                  onClick={() => openReplay(selectedArtifactRun)}
+                  className="px-4 py-2 border border-cyan-500/20 text-[10px] uppercase tracking-[0.3em] font-mono text-cyan-200 hover:bg-cyan-500/10 transition-colors"
+                >
+                  Open Replay
+                </button>
+                <button
+                  onClick={() => downloadReplay(selectedArtifactRun)}
+                  className="px-4 py-2 border border-cyan-500/20 text-[10px] uppercase tracking-[0.3em] font-mono text-cyan-200 hover:bg-cyan-500/10 transition-colors"
+                >
+                  Download Replay
                 </button>
                 <button
                   onClick={() => setSelectedArtifactRun(null)}
