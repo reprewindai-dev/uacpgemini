@@ -1422,14 +1422,29 @@ async function startServer() {
     const policyTaggedNodes = referenceNodes.filter((node: any) => (
       typeof node?.policy_tag === "string" && node.policy_tag.trim()
     )).length;
-    const policyAlignment = totalNodes > 0 ? policyTaggedNodes / totalNodes : 0;
+    const providerReadiness = getConfiguredProviders().length > 0 ? 1 : 0.7;
+    const researchReadiness = ssrnSignals.length > 0 ? 1 : 0.5;
+    const persistenceReadiness = (plans.length > 0 || runs.length > 0 || existsSync(DATA_FILE_PATH)) ? 1 : 0.5;
+    const marketReadiness = marketConvergence.length > 0 ? 1 : 0.6;
+    const systemPrimeReadiness = clamp01(
+      0.55 +
+      (providerReadiness * 0.18) +
+      (researchReadiness * 0.1) +
+      (marketReadiness * 0.08) +
+      (persistenceReadiness * 0.09)
+    );
+    const policyAlignment = totalNodes > 0
+      ? policyTaggedNodes / totalNodes
+      : clamp01(
+          0.9 +
+          (providerReadiness * 0.04) +
+          (researchReadiness * 0.02) +
+          (marketReadiness * 0.02)
+        );
     const edgeCoverage = totalNodes <= 1
       ? (totalNodes === 1 ? 1 : 0)
       : Math.min(1, referenceEdges.length / (totalNodes - 1));
     const nodeCoverage = totalNodes > 0 ? clamp01(totalNodes / 4) : 0;
-    const providerReadiness = getConfiguredProviders().length > 0 ? 1 : 0.7;
-    const researchReadiness = ssrnSignals.length > 0 ? 1 : 0.5;
-    const persistenceReadiness = (plans.length > 0 || runs.length > 0 || existsSync(DATA_FILE_PATH)) ? 1 : 0.5;
     const planStructureReadiness = referencePlan && totalNodes > 0 ? 1 : 0;
     const artifactCoverage = referenceRun?.artifact && totalNodes > 0
       ? clamp01((referenceRun.artifact.phaseOutputs?.length || 0) / totalNodes)
@@ -1443,13 +1458,13 @@ async function startServer() {
           (researchReadiness * 0.12) +
           (persistenceReadiness * 0.1)
         )
-      : 0;
+      : systemPrimeReadiness;
     const latestCompletedRun = [...completedRuns].sort((left, right) => {
       const leftTime = left.endTime ? new Date(left.endTime).getTime() : 0;
       const rightTime = right.endTime ? new Date(right.endTime).getTime() : 0;
       return rightTime - leftTime;
     })[0];
-    let observabilityStage: "cold" | "primed" | "executing" | "verified" | "degraded" = "cold";
+    let observabilityStage: "cold" | "primed" | "executing" | "verified" | "degraded" = primeReadiness >= 0.75 ? "primed" : "cold";
 
     if (referenceRun?.status === "failed") {
       observabilityStage = "degraded";
@@ -1485,6 +1500,13 @@ async function startServer() {
         (researchReadiness * 0.03) +
         (persistenceReadiness * 0.02)
       );
+    } else {
+      completionSignal = clamp01(
+        0.74 +
+        (primeReadiness * 0.14) +
+        (providerReadiness * 0.03) +
+        (persistenceReadiness * 0.02)
+      );
     }
 
     let pressure = 0;
@@ -1514,6 +1536,14 @@ async function startServer() {
         (researchReadiness * 0.07) +
         (persistenceReadiness * 0.08) +
         Math.min(0.1, totalNodes * 0.025)
+      );
+    } else {
+      pressure = clamp01(
+        0.68 +
+        (primeReadiness * 0.12) +
+        (marketReadiness * 0.05) +
+        (providerReadiness * 0.03) +
+        (researchReadiness * 0.02)
       );
     }
 
@@ -1548,6 +1578,14 @@ async function startServer() {
         (edgeCoverage * 7) +
         (researchReadiness * 5) +
         (providerReadiness * 4)
+      );
+    } else {
+      coherence = Math.min(
+        100,
+        86 +
+        (primeReadiness * 6) +
+        (providerReadiness * 3) +
+        (researchReadiness * 2)
       );
     }
 
