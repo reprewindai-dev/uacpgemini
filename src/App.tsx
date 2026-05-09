@@ -341,6 +341,8 @@ export default function App() {
 
   const certaintyIndex = typeof signals?.certainty_index === "number" ? signals.certainty_index : 0;
   const certaintyWidth = `${Math.max(0, Math.min(1, certaintyIndex)) * 100}%`;
+  const observabilityStage = typeof signals?.observability_stage === "string" ? signals.observability_stage : "cold";
+  const primeReadiness = typeof signals?.prime_readiness === "number" ? signals.prime_readiness : 0;
 
   return (
     <div className="h-screen flex flex-col bg-[#050505] text-[#e0e0e0] font-sans selection:bg-blue-500/30 overflow-hidden relative">
@@ -875,7 +877,22 @@ export default function App() {
               )}
               
               <div className="pt-8 border-t border-white/5 space-y-6">
-                <h3 className="text-[9px] uppercase tracking-widest text-white/20 font-bold">Observability Signals</h3>
+                <div className="flex items-center justify-between gap-4">
+                  <h3 className="text-[9px] uppercase tracking-widest text-white/20 font-bold">Observability Signals</h3>
+                  <span className={`text-[8px] font-mono uppercase tracking-[0.25em] ${
+                    observabilityStage === 'verified'
+                      ? 'text-green-400'
+                      : observabilityStage === 'primed'
+                        ? 'text-blue-300'
+                        : observabilityStage === 'executing'
+                          ? 'text-purple-300'
+                          : observabilityStage === 'degraded'
+                            ? 'text-rose-400'
+                            : 'text-white/30'
+                  }`}>
+                    {observabilityStage}
+                  </span>
+                </div>
                 {signals?.horowitz_signals?.map((sig: any, sIdx: number) => (
                   <div key={`${sig.id}-${sIdx}`} className="space-y-4">
                     <div className="flex justify-between items-end">
@@ -883,7 +900,30 @@ export default function App() {
                         <span className="text-[9px] font-mono text-white/40 uppercase tracking-tighter">{sig.id}</span>
                         <span className="text-xs font-serif italic text-white/80">Value Trace</span>
                       </div>
-                      <span className={`text-[9px] font-mono uppercase font-bold ${sig.trend === 'rising' ? 'text-green-500' : 'text-blue-400'}`}>{sig.trend}</span>
+                      <div className="flex flex-col items-end gap-1">
+                        {sig.state && (
+                          <span className={`text-[8px] font-mono uppercase tracking-[0.25em] ${
+                            sig.state === 'verified'
+                              ? 'text-green-400'
+                              : sig.state === 'primed'
+                                ? 'text-blue-300'
+                                : sig.state === 'degraded'
+                                  ? 'text-rose-400'
+                                  : 'text-white/35'
+                          }`}>
+                            {sig.state}
+                          </span>
+                        )}
+                        <span className={`text-[9px] font-mono uppercase font-bold ${
+                          sig.trend === 'rising'
+                            ? 'text-green-500'
+                            : sig.trend === 'stable'
+                              ? 'text-blue-400'
+                              : 'text-rose-400'
+                        }`}>
+                          {sig.trend}
+                        </span>
+                      </div>
                     </div>
                     
                     <div className="h-16 w-full opacity-50 overflow-hidden grayscale hover:grayscale-0 transition-all duration-700">
@@ -924,6 +964,10 @@ export default function App() {
 
            <div className="p-8 border-t border-white/5 bg-black/40">
               <div className="flex flex-col gap-4">
+                <div className="flex justify-between items-center text-[8px] font-mono text-white/25 uppercase tracking-[0.25em]">
+                  <span>Prime Readiness</span>
+                  <span className="text-blue-300">{Math.round(primeReadiness * 100)}%</span>
+                </div>
                 <div className="flex justify-between items-center text-[9px] font-mono text-white/20 uppercase tracking-widest">
                   <span>Certainty Index</span>
                   <span className="text-white text-sm font-serif italic">{certaintyIndex.toFixed(4)}</span>

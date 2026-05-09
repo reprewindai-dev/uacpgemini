@@ -1308,12 +1308,42 @@ async function startServer() {
   app.get("/api/observability/signals", (req, res) => {
     const completedRuns = runs.filter((run) => run.status === "completed");
     const activeRuns = runs.filter((run) => run.status === "pending" || run.status === "executing");
-    const totalNodes = plans.reduce((sum, plan) => sum + (Array.isArray(plan.graph?.nodes) ? plan.graph.nodes.length : 0), 0);
-    const policyTaggedNodes = plans.reduce((sum, plan) => (
-      sum + (Array.isArray(plan.graph?.nodes)
-        ? plan.graph.nodes.filter((node: any) => typeof node?.policy_tag === "string" && node.policy_tag.trim()).length
-        : 0)
-    ), 0);
+    const latestPlan = [...plans].sort((left, right) => (
+      new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+    ))[0];
+    const latestRun = [...runs].sort((left, right) => (
+      new Date(right.startTime).getTime() - new Date(left.startTime).getTime()
+    ))[0];
+    const referencePlan = latestPlan || latestRun?.planSnapshot;
+    const referenceRun = latestRun && referencePlan && (
+      latestRun.planId === referencePlan.id || latestRun.planSnapshot?.id === referencePlan.id
+    )
+      ? latestRun
+      : undefined;
+    const referenceNodes = Array.isArray(referencePlan?.graph?.nodes) ? referencePlan.graph.nodes : [];
+    const referenceEdges = Array.isArray(referencePlan?.graph?.edges) ? referencePlan.graph.edges : [];
+    const totalNodes = referenceNodes.length;
+    const policyTaggedNodes = referenceNodes.filter((node: any) => (
+      typeof node?.policy_tag === "string" && node.policy_tag.trim()
+    )).length;
+    const policyAlignment = totalNodes > 0 ? policyTaggedNodes / totalNodes : 0;
+    const edgeCoverage = totalNodes <= 1
+      ? (totalNodes === 1 ? 1 : 0)
+      : Math.min(1, referenceEdges.length / (totalNodes - 1));
+    const providerReadiness = getConfiguredProviders().length > 0 ? 1 : 0.7;
+    const researchReadiness = ssrnSignals.length > 0 ? 1 : 0.5;
+    const persistenceReadiness = (plans.length > 0 || runs.length > 0 || existsSync(DATA_FILE_PATH)) ? 1 : 0.5;
+    const planStructureReadiness = referencePlan && totalNodes > 0 ? 1 : 0;
+    const primeReadiness = referencePlan
+      ? (
+          planStructureReadiness +
+          policyAlignment +
+          edgeCoverage +
+          providerReadiness +
+          researchReadiness +
+          persistenceReadiness
+        ) / 6
+      : 0;
     const runDurations = completedRuns
       .map((run) => {
         if (!run.endTime) {
@@ -1326,24 +1356,77 @@ async function startServer() {
     const averageDurationMs = runDurations.length > 0
       ? runDurations.reduce((sum, duration) => sum + duration, 0) / runDurations.length
       : 0;
-    const averageProgress = activeRuns.length > 0
-      ? activeRuns.reduce((sum, run) => sum + run.progress, 0) / activeRuns.length
-      : completedRuns.length > 0
-        ? 100
-        : 0;
-    const policyAlignment = totalNodes > 0 ? policyTaggedNodes / totalNodes : 1;
-    const pressure = activeRuns.length > 0 ? activeRuns.length / Math.max(1, runs.length) : 0;
-    const completionRate = runs.length > 0 ? completedRuns.length / runs.length : 0;
-    const coherence = Math.min(100, Math.max(0, averageProgress));
+    let observabilityStage: "cold" | "primed" | "executing" | "verified" | "degraded" = "cold";
+
+    if (referenceRun?.status === "failed") {
+      observabilityStage = "degraded";
+    } else if (referenceRun && (referenceRun.status === "pending" || referenceRun.status === "executing")) {
+      observabilityStage = "executing";
+    } else if (referenceRun?.status === "completed" && referenceRun.artifact) {
+      observabilityStage = "verified";
+    } else if (referencePlan) {
+      observabilityStage = "primed";
+    }
+
+    let completionSignal = 0;
+    if (referenceRun?.status === "completed" && referenceRun.artifact) {
+      completionSignal = 1;
+    } else if (referenceRun?.status === "executing") {
+      completionSignal = Math.max(referenceRun.progress / 100, primeReadiness * 0.82);
+    } else if (referenceRun?.status === "pending") {
+      completionSignal = Math.max(0.55, primeReadiness * 0.85);
+    } else if (referenceRun?.status === "failed") {
+      completionSignal = Math.min(0.35, primeReadiness * 0.4);
+    } else if (referencePlan) {
+      completionSignal = primeReadiness;
+    }
+
+    let pressure = 0;
+    if (referenceRun?.status === "completed" && referenceRun.artifact) {
+      pressure = referenceRun.artifact.nextAction ? 1 : 0.92;
+    } else if (referenceRun && (referenceRun.status === "pending" || referenceRun.status === "executing")) {
+      pressure = Math.max(0.7, primeReadiness);
+    } else if (referenceRun?.status === "failed") {
+      pressure = 0.25;
+    } else if (referencePlan) {
+      pressure = primeReadiness;
+    }
+
+    let coherence = 0;
+    if (referenceRun?.status === "completed" && referenceRun.artifact) {
+      coherence = 100;
+    } else if (referenceRun?.status === "executing") {
+      coherence = Math.min(100, Math.max(referenceRun.progress, primeReadiness * 100));
+    } else if (referenceRun?.status === "pending") {
+      coherence = Math.max(60, primeReadiness * 100);
+    } else if (referenceRun?.status === "failed") {
+      coherence = Math.min(35, primeReadiness * 40);
+    } else if (referencePlan) {
+      coherence = primeReadiness * 100;
+    }
+
     const latency = averageDurationMs > 0
       ? averageDurationMs / Math.max(1, Math.round(totalNodes / Math.max(1, plans.length)))
       : 0;
     const certaintyIndex = Math.min(0.9999, Math.max(
       0,
-      (policyAlignment * 0.45) + (completionRate * 0.35) + ((coherence / 100) * 0.2)
+      (policyAlignment * 0.35) +
+      (completionSignal * 0.3) +
+      (pressure * 0.15) +
+      ((coherence / 100) * 0.2)
     ));
 
+    const signalState = observabilityStage === "primed"
+      ? "primed"
+      : observabilityStage === "verified"
+        ? "verified"
+        : observabilityStage === "degraded"
+          ? "degraded"
+          : "live";
+
     res.json({
+      observability_stage: observabilityStage,
+      prime_readiness: Number(primeReadiness.toFixed(3)),
       quantum_coherence: coherence,
       classical_latency: Number(latency.toFixed(1)),
       uacp_pressure: Number(pressure.toFixed(3)),
@@ -1353,18 +1436,21 @@ async function startServer() {
       horowitz_signals: [
         {
           id: 'RUN_COMPLETION',
-          value: Number(completionRate.toFixed(3)),
-          trend: completionRate >= 0.5 ? 'rising' : 'stable'
+          value: Number(completionSignal.toFixed(3)),
+          trend: completionSignal >= 0.9 ? 'rising' : completionSignal >= 0.6 ? 'stable' : 'falling',
+          state: signalState,
         },
         {
           id: 'POLICY_ALIGNMENT',
           value: Number(policyAlignment.toFixed(3)),
-          trend: policyAlignment >= 0.9 ? 'rising' : 'stable'
+          trend: policyAlignment >= 0.9 ? 'rising' : policyAlignment >= 0.6 ? 'stable' : 'falling',
+          state: signalState,
         },
         {
           id: 'EXECUTION_PRESSURE',
           value: Number(pressure.toFixed(3)),
-          trend: pressure > 0.5 ? 'rising' : 'falling'
+          trend: pressure >= 0.9 ? 'rising' : pressure >= 0.6 ? 'stable' : 'falling',
+          state: signalState,
         }
       ]
     });
