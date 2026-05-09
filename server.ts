@@ -162,6 +162,14 @@ interface RunArtifact {
   generatedAt: string;
   planId: string;
   runId: string;
+  statusModel: {
+    plan_status: Plan["status"];
+    run_status: Run["status"];
+    artifact_status: "compiled" | "pending";
+    signal_status: "verified" | "executing" | "pending" | "degraded";
+    deployment_status: "not_verified" | "verified";
+    claim_level: "governance_compilation_verified" | "deployment_verified" | "draft_only";
+  };
   originalIntent: string;
   generatedGraph: Plan["graph"];
   nodeList: Plan["graph"]["nodes"];
@@ -1186,6 +1194,14 @@ function buildArtifactPrompt(plan: Plan, run: Run) {
     Return JSON with this shape:
     {
       "title": "Compiled Artifact title",
+      "statusModel": {
+        "plan_status": "draft|verified|locked",
+        "run_status": "completed|executing|pending|failed",
+        "artifact_status": "compiled|pending",
+        "signal_status": "verified|executing|pending|degraded",
+        "deployment_status": "not_verified|verified",
+        "claim_level": "governance_compilation_verified|deployment_verified|draft_only"
+      },
       "runContract": {
         "objective": "string",
         "acceptanceCriteria": ["string"],
@@ -1212,6 +1228,11 @@ function buildArtifactPrompt(plan: Plan, run: Run) {
       },
       "nextAction": "string"
     }
+
+    Rules:
+    - If the plan status is draft, do not claim deployed implementation.
+    - Distinguish plan verification from run verification.
+    - Default the claim level to governance_compilation_verified unless the provided data proves deployment verification.
   `;
 }
 
@@ -1415,6 +1436,16 @@ function createFallbackArtifact(plan: Plan, run: Run): RunArtifact {
     `Deliver the compiled operating plan to the command center with evidence attached for ${plan.name}.`,
     `Review unresolved constraints and approve the next execution cycle.`,
   ];
+  const statusModel: RunArtifact["statusModel"] = {
+    plan_status: plan.status,
+    run_status: "completed",
+    artifact_status: "compiled",
+    signal_status: "verified",
+    deployment_status: "not_verified",
+    claim_level: plan.status === "verified" || plan.status === "locked"
+      ? "deployment_verified"
+      : "governance_compilation_verified",
+  };
 
   return {
     artifactId: `artifact-${run.id}`,
@@ -1422,6 +1453,7 @@ function createFallbackArtifact(plan: Plan, run: Run): RunArtifact {
     generatedAt: new Date().toISOString(),
     planId: plan.id,
     runId: run.id,
+    statusModel,
     originalIntent: intent,
     generatedGraph: deepClone(plan.graph),
     nodeList: deepClone(nodes),
@@ -1436,7 +1468,7 @@ function createFallbackArtifact(plan: Plan, run: Run): RunArtifact {
         "No generic filler output is allowed.",
         "Archive every decision that changes execution order or ownership.",
       ],
-      successMetric: `Run ${run.id} completes with a usable artifact and explicit next action.`,
+      successMetric: `Run ${run.id} completes with a compiled artifact, explicit next action, and no deployment claims beyond the verified governance layer.`,
     },
     phaseOutputs: nodeOutputs,
     today: baseToday,
@@ -1456,21 +1488,35 @@ function createFallbackArtifact(plan: Plan, run: Run): RunArtifact {
       "Blocked dependency count",
       "Archive evidence freshness",
     ],
-    finalReport: `Run ${run.id} completed with ${nodes.length} artifact phases derived from the original intent: ${intent}`,
+    finalReport: `UACP completed a verified compilation run for the ${plan.status} ${plan.name}. The run produced ${nodes.length} phase outputs, a control graph, archive record, and operational signals derived from the original intent: ${intent}. Deployment-level implementation remains pending until the plan is promoted beyond ${plan.status} and backed by runtime checks, signed evidence packages, endpoint tests, and policy enforcement logs.`,
     archiveRecord: {
       recordId: `archive-${run.id}`,
-      summary: `Artifact bundle for ${plan.id}`,
+      summary: `Compiled artifact bundle for ${plan.id} with governance-level verification only`,
       entries: [
         `Intent captured: ${intent}`,
         `Node outputs recorded: ${nodes.map((node) => node.id).join(", ") || "none"}`,
+        `Status model: plan=${statusModel.plan_status}, run=${statusModel.run_status}, artifact=${statusModel.artifact_status}, signals=${statusModel.signal_status}, deployment=${statusModel.deployment_status}`,
       ],
     },
-    nextAction: "Open the compiled artifact, review the phase outputs, and approve the next execution cycle.",
+    nextAction: "Review the compiled artifact, promote the draft plan when evidence is complete, and run deployment verification before making implementation claims.",
   };
 }
 
 function normalizeArtifactResponse(data: any, plan: Plan, run: Run): RunArtifact {
   const fallback = createFallbackArtifact(plan, run);
+  const statusModel = data?.statusModel;
+  const normalizedStatusModel: RunArtifact["statusModel"] = {
+    plan_status: plan.status,
+    run_status: run.status === "failed" ? "failed" : run.status === "executing" ? "executing" : run.status === "pending" ? "pending" : "completed",
+    artifact_status: "compiled",
+    signal_status: run.status === "failed" ? "degraded" : run.status === "executing" ? "executing" : run.status === "pending" ? "pending" : "verified",
+    deployment_status: statusModel?.deployment_status === "verified" && (plan.status === "verified" || plan.status === "locked")
+      ? "verified"
+      : "not_verified",
+    claim_level: statusModel?.deployment_status === "verified" && (plan.status === "verified" || plan.status === "locked")
+      ? "deployment_verified"
+      : "governance_compilation_verified",
+  };
 
   return {
     artifactId: `artifact-${run.id}`,
@@ -1478,6 +1524,7 @@ function normalizeArtifactResponse(data: any, plan: Plan, run: Run): RunArtifact
     generatedAt: new Date().toISOString(),
     planId: plan.id,
     runId: run.id,
+    statusModel: normalizedStatusModel,
     originalIntent: plan.intent,
     generatedGraph: deepClone(plan.graph),
     nodeList: deepClone(plan.graph?.nodes || []),
@@ -1507,11 +1554,15 @@ function normalizeArtifactResponse(data: any, plan: Plan, run: Run): RunArtifact
     risks: Array.isArray(data?.risks) && data.risks.length > 0 ? data.risks.map(String) : fallback.risks,
     archives: Array.isArray(data?.archives) && data.archives.length > 0 ? data.archives.map(String) : fallback.archives,
     commandCenterSignals: Array.isArray(data?.commandCenterSignals) && data.commandCenterSignals.length > 0 ? data.commandCenterSignals.map(String) : fallback.commandCenterSignals,
-    finalReport: typeof data?.finalReport === "string" && data.finalReport.trim() ? data.finalReport.trim() : fallback.finalReport,
+    finalReport: typeof data?.finalReport === "string" && data.finalReport.trim()
+      ? data.finalReport.trim().replace(/successfully implemented/gi, "prepared as a compiled draft implementation plan")
+      : fallback.finalReport,
     archiveRecord: {
       recordId: `archive-${run.id}`,
       summary: typeof data?.archiveRecord?.summary === "string" && data.archiveRecord.summary.trim() ? data.archiveRecord.summary.trim() : fallback.archiveRecord.summary,
-      entries: Array.isArray(data?.archiveRecord?.entries) && data.archiveRecord.entries.length > 0 ? data.archiveRecord.entries.map(String) : fallback.archiveRecord.entries,
+      entries: Array.isArray(data?.archiveRecord?.entries) && data.archiveRecord.entries.length > 0
+        ? [...data.archiveRecord.entries.map(String), `Status model: plan=${normalizedStatusModel.plan_status}, run=${normalizedStatusModel.run_status}, artifact=${normalizedStatusModel.artifact_status}, signals=${normalizedStatusModel.signal_status}, deployment=${normalizedStatusModel.deployment_status}`]
+        : fallback.archiveRecord.entries,
     },
     nextAction: typeof data?.nextAction === "string" && data.nextAction.trim() ? data.nextAction.trim() : fallback.nextAction,
   };

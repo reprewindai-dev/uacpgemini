@@ -80,6 +80,14 @@ interface RunArtifact {
   generatedAt: string;
   planId: string;
   runId: string;
+  statusModel: {
+    plan_status: string;
+    run_status: string;
+    artifact_status: string;
+    signal_status: string;
+    deployment_status: string;
+    claim_level: string;
+  };
   originalIntent: string;
   generatedGraph: Plan["graph"];
   nodeList: Plan["graph"]["nodes"];
@@ -1023,12 +1031,19 @@ export default function App() {
         <div className="absolute inset-0 z-[75] bg-black/85 backdrop-blur-sm overflow-y-auto custom-scrollbar p-6">
           <div className="w-full max-w-6xl h-[90vh] mx-auto flex flex-col border border-white/10 bg-[#090909] shadow-2xl">
             <div className="shrink-0 flex items-start justify-between gap-6 p-6 border-b border-white/10 bg-white/[0.02]">
-              <div className="space-y-2">
+               <div className="space-y-2">
                 <span className="text-[10px] uppercase tracking-[0.35em] text-purple-300/70 font-mono">Compiled Artifact</span>
                 <h3 className="font-serif italic text-3xl text-white/90">{selectedArtifactRun.artifact.title}</h3>
                 <div className="flex gap-6 text-[10px] font-mono uppercase tracking-[0.25em] text-white/40">
                   <span>Plan ID: {selectedArtifactRun.planId}</span>
                   <span>Run ID: {selectedArtifactRun.id}</span>
+                </div>
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <StatusPill label="Plan" value={selectedArtifactRun.artifact.statusModel.plan_status} />
+                  <StatusPill label="Run" value={selectedArtifactRun.artifact.statusModel.run_status} />
+                  <StatusPill label="Artifact" value={selectedArtifactRun.artifact.statusModel.artifact_status} />
+                  <StatusPill label="Signals" value={selectedArtifactRun.artifact.statusModel.signal_status} />
+                  <StatusPill label="Deployment" value={selectedArtifactRun.artifact.statusModel.deployment_status} />
                 </div>
               </div>
               <div className="flex items-center gap-3">
@@ -1055,6 +1070,17 @@ export default function App() {
                 </ArtifactSection>
 
                 <div className="grid grid-cols-2 gap-4">
+                  <ArtifactSection title="Status Model">
+                    <div className="space-y-2 text-sm text-white/75">
+                      <p><span className="text-white/40">Claim level:</span> {selectedArtifactRun.artifact.statusModel.claim_level}</p>
+                      <p><span className="text-white/40">Plan:</span> {selectedArtifactRun.artifact.statusModel.plan_status}</p>
+                      <p><span className="text-white/40">Run:</span> {selectedArtifactRun.artifact.statusModel.run_status}</p>
+                      <p><span className="text-white/40">Artifact:</span> {selectedArtifactRun.artifact.statusModel.artifact_status}</p>
+                      <p><span className="text-white/40">Signals:</span> {selectedArtifactRun.artifact.statusModel.signal_status}</p>
+                      <p><span className="text-white/40">Deployment:</span> {selectedArtifactRun.artifact.statusModel.deployment_status}</p>
+                    </div>
+                  </ArtifactSection>
+
                   <ArtifactSection title="Run Contract">
                     <div className="space-y-3 text-sm text-white/75">
                       <p>{selectedArtifactRun.artifact.runContract.objective}</p>
@@ -1388,6 +1414,14 @@ function ArtifactSection({ title, children }: { title: string, children: ReactNo
       <div className="text-[10px] font-mono uppercase tracking-[0.3em] text-white/35 mb-4">{title}</div>
       {children}
     </section>
+  );
+}
+
+function StatusPill({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="px-3 py-1 border border-white/10 bg-white/[0.03] text-[9px] font-mono uppercase tracking-[0.22em] text-white/70">
+      {label}: {value.replace(/_/g, " ")}
+    </span>
   );
 }
 
