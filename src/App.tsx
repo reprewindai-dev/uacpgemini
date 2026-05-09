@@ -914,30 +914,28 @@ export default function App() {
                         <span className="text-xs font-serif italic text-white/80">Value Trace</span>
                       </div>
                       <div className="flex flex-col items-end gap-1">
-                        {sig.state && (
-                          <span className={`text-[8px] font-mono uppercase tracking-[0.25em] ${
-                            sig.state === 'verified'
-                              ? 'text-green-400'
-                              : sig.state === 'primed'
-                                ? 'text-blue-300'
-                                : sig.state === 'executing'
-                                  ? 'text-purple-300'
-                                  : sig.state === 'degraded'
-                                    ? 'text-rose-400'
-                                    : 'text-white/35'
-                          }`}>
-                            {sig.state}
+                        <span className={`text-[9px] font-mono uppercase font-bold tracking-[0.25em] ${
+                          sig.state === 'verified'
+                            ? 'text-green-400'
+                            : sig.state === 'primed'
+                              ? 'text-blue-300'
+                              : sig.state === 'executing'
+                                ? 'text-purple-300'
+                                : sig.state === 'degraded'
+                                  ? 'text-rose-400'
+                                  : sig.trend === 'rising'
+                                    ? 'text-green-500'
+                                    : sig.trend === 'stable'
+                                      ? 'text-blue-400'
+                                      : 'text-rose-400'
+                        }`}>
+                          {sig.state || sig.trend}
+                        </span>
+                        {sig.state && sig.trend && sig.state !== sig.trend && (
+                          <span className="text-[8px] font-mono uppercase tracking-[0.2em] text-white/25">
+                            trend: {sig.trend}
                           </span>
                         )}
-                        <span className={`text-[9px] font-mono uppercase font-bold ${
-                          sig.trend === 'rising'
-                            ? 'text-green-500'
-                            : sig.trend === 'stable'
-                              ? 'text-blue-400'
-                              : 'text-rose-400'
-                        }`}>
-                          {sig.trend}
-                        </span>
                       </div>
                     </div>
                     
