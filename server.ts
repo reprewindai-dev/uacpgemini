@@ -215,6 +215,17 @@ interface RunArtifact {
   nextAction: string;
 }
 
+interface PersistedArchiveRecord {
+  recordId: string;
+  runId: string;
+  planId: string;
+  createdAt: string;
+  claimLevel: RunArtifact["statusModel"]["claim_level"];
+  deploymentStatus: RunArtifact["statusModel"]["deployment_status"];
+  summary: string;
+  entries: string[];
+}
+
 type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
 type ModelOperation = "plan_compile" | "artifact_compile";
 
@@ -237,12 +248,14 @@ interface AppState {
   plans: Plan[];
   runs: Run[];
   events: AppEvent[];
+  archiveRecords: PersistedArchiveRecord[];
   observabilityTelemetry: ObservabilityTelemetry;
 }
 
 let plans: Plan[] = [];
 let runs: Run[] = [];
 let events: AppEvent[] = [];
+let archiveRecords: PersistedArchiveRecord[] = [];
 let observabilityTelemetry: ObservabilityTelemetry = {
   recentLatencies: [],
   lastMeasuredLatencyMs: null,
@@ -277,6 +290,7 @@ function persistState() {
     plans,
     runs,
     events,
+    archiveRecords,
     observabilityTelemetry,
   };
 
@@ -304,6 +318,7 @@ function loadPersistedState() {
       };
     }) as Run[] : [];
     events = Array.isArray(parsed.events) ? parsed.events : [];
+    archiveRecords = Array.isArray(parsed.archiveRecords) ? parsed.archiveRecords : [];
     observabilityTelemetry = parsed.observabilityTelemetry && Array.isArray(parsed.observabilityTelemetry.recentLatencies)
       ? {
           recentLatencies: parsed.observabilityTelemetry.recentLatencies
@@ -339,6 +354,7 @@ function loadPersistedState() {
     plans = [];
     runs = [];
     events = [];
+    archiveRecords = [];
     observabilityTelemetry = {
       recentLatencies: [],
       lastMeasuredLatencyMs: null,
@@ -1272,6 +1288,14 @@ function normalizeEntropy(value: unknown, fallback: number) {
   return Math.min(1, Math.max(0, parsed));
 }
 
+function normalizeNodeDescription(description: string) {
+  return description
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function resolvePolicyMetadata(nodeDescription: string, suggestedTag?: string | null) {
   const description = nodeDescription.toLowerCase();
   const normalizedSuggestedTag = typeof suggestedTag === "string" ? suggestedTag.trim() : "";
@@ -1469,15 +1493,43 @@ function normalizeCompiledPlan(planData: any, intent: string) {
     })
     .filter(Boolean);
 
-  const nodes = normalizedNodes.length > 0 ? normalizedNodes : fallback.graph.nodes;
+  const sourceNodes = normalizedNodes.length > 0 ? normalizedNodes : fallback.graph.nodes;
+  const dedupedNodes: typeof sourceNodes = [];
+  const nodeIdMap = new Map<string, string>();
+  const descriptionMap = new Map<string, typeof sourceNodes[number]>();
+
+  for (const node of sourceNodes) {
+    const normalizedDescription = normalizeNodeDescription(node.description);
+    const existing = descriptionMap.get(normalizedDescription);
+    if (existing) {
+      nodeIdMap.set(node.id, existing.id);
+      existing.entropy = Math.min(existing.entropy ?? 1, node.entropy ?? 1);
+      if ((node.confidence === "high" && existing.confidence !== "high") || (node.confidence === "medium" && existing.confidence === "low")) {
+        existing.policy_tag = node.policy_tag;
+        existing.policy_source = node.policy_source;
+        existing.mapping_reason = node.mapping_reason;
+        existing.confidence = node.confidence;
+      }
+      continue;
+    }
+
+    dedupedNodes.push({ ...node });
+    descriptionMap.set(normalizedDescription, dedupedNodes[dedupedNodes.length - 1]);
+    nodeIdMap.set(node.id, node.id);
+  }
+
+  const nodes = dedupedNodes.length > 0 ? dedupedNodes : fallback.graph.nodes;
   const validNodeIds = new Set(nodes.map((node) => node.id));
   const normalizedEdges = Array.isArray(planData?.graph?.edges)
     ? planData.graph.edges
         .map((edge: any) => ({
-          from: typeof edge?.from === "string" ? edge.from.trim() : "",
-          to: typeof edge?.to === "string" ? edge.to.trim() : "",
+          from: nodeIdMap.get(typeof edge?.from === "string" ? edge.from.trim() : "") || "",
+          to: nodeIdMap.get(typeof edge?.to === "string" ? edge.to.trim() : "") || "",
         }))
-        .filter((edge: { from: string; to: string }) => validNodeIds.has(edge.from) && validNodeIds.has(edge.to))
+        .filter((edge: { from: string; to: string }) => edge.from && edge.to && edge.from !== edge.to && validNodeIds.has(edge.from) && validNodeIds.has(edge.to))
+        .filter((edge: { from: string; to: string }, index: number, all: Array<{ from: string; to: string }>) => (
+          all.findIndex((candidate) => candidate.from === edge.from && candidate.to === edge.to) === index
+        ))
     : [];
 
   return {
@@ -1726,6 +1778,54 @@ function addEvent(type: string, message: string, metadata?: any) {
   broadcast({ type: 'event', data: event });
 }
 
+function persistArchiveRecord(artifact: RunArtifact) {
+  const record: PersistedArchiveRecord = {
+    recordId: artifact.archiveRecord.recordId,
+    runId: artifact.runId,
+    planId: artifact.planId,
+    createdAt: artifact.generatedAt,
+    claimLevel: artifact.statusModel.claim_level,
+    deploymentStatus: artifact.statusModel.deployment_status,
+    summary: artifact.archiveRecord.summary,
+    entries: artifact.archiveRecord.entries,
+  };
+
+  archiveRecords = [
+    record,
+    ...archiveRecords.filter((existing) => existing.recordId !== record.recordId),
+  ].slice(0, 200);
+  persistState();
+}
+
+function validateArtifactEvidence(plan: Plan, artifact: RunArtifact) {
+  const missingReasons = artifact.nodeList.filter((node) => !node.mapping_reason || !node.policy_tag);
+  const missingArchives = !Array.isArray(artifact.archives) || artifact.archives.length === 0;
+  const missingArchiveRecord = !Array.isArray(artifact.archiveRecord.entries) || artifact.archiveRecord.entries.length === 0;
+  const missingSignals = !Array.isArray(artifact.commandCenterSignals) || artifact.commandCenterSignals.length === 0;
+
+  if (missingReasons.length > 0) {
+    return `Policy evidence missing for ${missingReasons.length} node(s).`;
+  }
+
+  if (missingArchives) {
+    return "Archive evidence list is empty.";
+  }
+
+  if (missingArchiveRecord) {
+    return "Archive record entries are missing.";
+  }
+
+  if (missingSignals) {
+    return "Command-center signals are missing.";
+  }
+
+  if (plan.status === "draft" && artifact.statusModel.deployment_status === "verified") {
+    return "Draft plan cannot claim deployment verification.";
+  }
+
+  return null;
+}
+
 // --- WebSocket Support ---
 let clients: Set<WebSocket> = new Set();
 function broadcast(data: any) {
@@ -1896,6 +1996,8 @@ async function startServer() {
   app.get("/api/ssrn-signals", (req, res) => res.json(ssrnSignals));
 
   app.get("/api/events", (req, res) => res.json(events));
+
+  app.get("/api/archive-records", (req, res) => res.json(archiveRecords));
 
   app.get("/api/observability/signals", (req, res) => {
     const completedRuns = runs.filter((run) => run.status === "completed");
@@ -2228,6 +2330,27 @@ async function startServer() {
       run.artifact = fallbackArtifact;
       run.output = fallbackArtifact.finalReport;
     }
+
+    if (!run.artifact) {
+      run.status = "failed";
+      run.output = "Run failed because artifact compilation did not produce an artifact.";
+      persistState();
+      addEvent("RUN_FAILED", `Execution run ${runId} failed because no artifact was produced`, { runId });
+      broadcast({ type: "run_update", data: run });
+      return;
+    }
+
+    const evidenceFailure = validateArtifactEvidence(plan, run.artifact);
+    if (evidenceFailure) {
+      run.status = "failed";
+      run.output = `Run blocked: ${evidenceFailure}`;
+      persistState();
+      addEvent("RUN_FAILED", `Execution run ${runId} blocked: ${evidenceFailure}`, { runId, planId: plan.id });
+      broadcast({ type: "run_update", data: run });
+      return;
+    }
+
+    persistArchiveRecord(run.artifact);
 
     run.status = 'completed';
     run.endTime = new Date().toISOString();
