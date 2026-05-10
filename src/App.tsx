@@ -192,6 +192,10 @@ export default function App() {
   const executionViewportRef = useRef<HTMLDivElement | null>(null);
   const activePlan = plans[0];
   const latestArtifactRun = runs.find((run) => run.artifact) ?? null;
+  const blackBoxMode = typeof window !== "undefined" && (
+    new URLSearchParams(window.location.search).get("mode") === "blackbox" ||
+    new URLSearchParams(window.location.search).get("demo") === "1"
+  );
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -590,10 +594,15 @@ export default function App() {
       </header>
 
       {/* Main Content Workspace */}
-      <main className="flex-1 grid grid-cols-12 gap-1 p-1 bg-white/5 overflow-hidden">
+      <main className={`flex-1 grid gap-1 p-1 bg-white/5 overflow-hidden ${blackBoxMode ? "grid-cols-1" : "grid-cols-12"}`}>
         
         {/* Left Column: Research Signals & Event Log */}
-        <section className="col-span-3 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel">
+        <section
+          aria-hidden={blackBoxMode}
+          className={blackBoxMode
+            ? "w-0 min-w-0 max-w-0 overflow-hidden opacity-0 pointer-events-none border-0 p-0 m-0"
+            : "col-span-3 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel"}
+        >
           <div className="p-6 border-b border-white/5 bg-gradient-to-b from-white/[0.02] to-transparent">
             <h2 className="text-[10px] uppercase tracking-[0.2em] text-blue-400 font-bold mb-1 flex items-center gap-2">
               <Search size={10} />
@@ -662,7 +671,7 @@ export default function App() {
         </section>
 
         {/* Center Panel: Hero Interaction Surface */}
-        <section className="col-span-6 flex flex-col bg-[#080808] border border-white/5 overflow-hidden technical-grid relative">
+        <section className={`${blackBoxMode ? "col-span-1" : "col-span-6"} flex flex-col bg-[#080808] border border-white/5 overflow-hidden technical-grid relative`}>
           <AnimatePresence mode="wait">
             {activeTab === 'intent' && (
               <motion.div 
@@ -1085,7 +1094,12 @@ export default function App() {
         </section>
 
         {/* Right Column: Convergence Telemetry */}
-        <section className="col-span-3 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel">
+        <section
+          aria-hidden={blackBoxMode}
+          className={blackBoxMode
+            ? "w-0 min-w-0 max-w-0 overflow-hidden opacity-0 pointer-events-none border-0 p-0 m-0"
+            : "col-span-3 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel"}
+        >
            <div className="p-6 border-b border-white/5 bg-gradient-to-b from-white/[0.02] to-transparent">
               <h2 className="text-[10px] uppercase tracking-[0.2em] text-purple-400 font-bold mb-1 flex items-center gap-2">
                 <Activity size={10} />
