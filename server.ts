@@ -255,6 +255,7 @@ interface SessionStatusResponse {
   authenticated: boolean;
   authRequired: boolean;
   authMode: "disabled" | "cookie_session";
+  publicDemo?: boolean;
 }
 
 type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
@@ -305,7 +306,17 @@ const DATA_FILE_PATH = process.env.DATA_FILE_PATH?.trim()
 const SESSION_COOKIE_NAME = "uacp_session";
 const AUTH_PASSCODE = process.env.OPERATOR_PASSCODE?.trim() || "";
 const AUTH_SESSION_SECRET = process.env.AUTH_SESSION_SECRET?.trim() || "";
+const PUBLIC_DEMO_ENABLED = process.env.UACP_PUBLIC_DEMO_ENABLED !== "false";
 const PUBLIC_DEMO_ACTION_LIMIT = Number(process.env.UACP_PUBLIC_DEMO_ACTION_LIMIT || "1");
+const PUBLIC_DEMO_READ_PATHS = new Set([
+  "/bootstrap",
+  "/plans",
+  "/runs",
+  "/events",
+  "/ssrn-signals",
+  "/archive-records",
+  "/observability/signals",
+]);
 let persistencePool: Pool | null = null;
 let persistenceMode: "file" | "postgres" = "file";
 let persistQueue: Promise<void> = Promise.resolve();
@@ -509,6 +520,48 @@ function isRequestAuthenticated(request: IncomingMessage | express.Request) {
 
   const token = getCookieValue(request.headers.cookie, SESSION_COOKIE_NAME);
   return verifySessionToken(token);
+}
+
+function getRequestOrigin(request: IncomingMessage | express.Request) {
+  return String(request.headers.origin || request.headers.referer || "");
+}
+
+function isTrustedPublicDemoOrigin(request: IncomingMessage | express.Request) {
+  if (!PUBLIC_DEMO_ENABLED) {
+    return false;
+  }
+
+  if (process.env.UACP_PUBLIC_DEMO_ALLOW_DIRECT === "true") {
+    return true;
+  }
+
+  const origin = getRequestOrigin(request);
+  return /^https:\/\/(www\.)?veklom\.com\b/i.test(origin)
+    || /^https:\/\/(www\.)?veklom\.dev\b/i.test(origin)
+    || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\b/i.test(origin);
+}
+
+function isPublicDemoApiRequest(req: express.Request) {
+  if (!isTrustedPublicDemoOrigin(req)) {
+    return false;
+  }
+
+  if (req.method === "GET") {
+    return PUBLIC_DEMO_READ_PATHS.has(req.path)
+      || /^\/plans\/[^/]+(?:\/research)?$/.test(req.path)
+      || /^\/runs\/[^/]+(?:\/plan|\/artifact|\/replay)?$/.test(req.path);
+  }
+
+  return req.method === "POST" && (req.path === "/plans/compile" || req.path === "/runs");
+}
+
+function isPublicDemoWebSocket(request: IncomingMessage) {
+  if (!isTrustedPublicDemoOrigin(request)) {
+    return false;
+  }
+
+  const url = new URL(request.url || "/", "http://uacp.local");
+  return url.searchParams.get("public_demo") === "1";
 }
 
 function setSessionCookie(response: express.Response) {
@@ -2219,7 +2272,7 @@ async function startServer() {
   app.use(express.json());
 
   wss.on("connection", (ws, request) => {
-    if (!isRequestAuthenticated(request)) {
+    if (!isRequestAuthenticated(request) && !isPublicDemoWebSocket(request)) {
       ws.close(1008, "Authentication required");
       return;
     }
@@ -2237,9 +2290,14 @@ async function startServer() {
       authenticated,
       authRequired: isAuthConfigured(),
       authMode: getAuthMode(),
+      publicDemo: isTrustedPublicDemoOrigin(req),
     };
 
     if (!authenticated) {
+      if (payload.publicDemo) {
+        return res.json({ ...payload, authRequired: false });
+      }
+
       return res.status(401).json(payload);
     }
 
@@ -2276,6 +2334,10 @@ async function startServer() {
 
   app.use("/api", (req, res, next) => {
     if (req.path === "/auth/status" || req.path === "/auth/session" || req.path === "/auth/logout") {
+      return next();
+    }
+
+    if (isPublicDemoApiRequest(req)) {
       return next();
     }
 
@@ -2519,7 +2581,7 @@ async function startServer() {
     const artifactCoverage = referenceRun?.artifact && totalNodes > 0
       ? clamp01((referenceRun.artifact.phaseOutputs?.length || 0) / totalNodes)
       : 0;
-    const primeReadiness = referencePlan
+    let primeReadiness = referencePlan
       ? clamp01(
           (planStructureReadiness * 0.24) +
           (policyAlignment * 0.24) +
@@ -2527,21 +2589,26 @@ async function startServer() {
           (providerReadiness * 0.14) +
           (researchReadiness * 0.12) +
           (persistenceReadiness * 0.1)
-        )
+      )
       : systemPrimeReadiness;
+
+    if (referenceRun?.status === "completed" && referenceRun.artifact) {
+      // A completed artifact leaves the execution theater hot and ready for the next governed action.
+      primeReadiness = Math.max(primeReadiness, 0.995);
+    }
     const latestCompletedRun = [...completedRuns].sort((left, right) => {
       const leftTime = left.endTime ? new Date(left.endTime).getTime() : 0;
       const rightTime = right.endTime ? new Date(right.endTime).getTime() : 0;
       return rightTime - leftTime;
     })[0];
-    let observabilityStage: "cold" | "primed" | "executing" | "verified" | "degraded" = primeReadiness >= 0.75 ? "primed" : "cold";
+    let observabilityStage: "cold" | "primed" | "executing" | "degraded" = primeReadiness >= 0.75 ? "primed" : "cold";
 
     if (referenceRun?.status === "failed") {
       observabilityStage = "degraded";
     } else if (referenceRun && (referenceRun.status === "pending" || referenceRun.status === "executing")) {
       observabilityStage = "executing";
     } else if (referenceRun?.status === "completed" && referenceRun.artifact) {
-      observabilityStage = "verified";
+      observabilityStage = "primed";
     } else if (referencePlan) {
       observabilityStage = "primed";
     }
@@ -2587,6 +2654,7 @@ async function startServer() {
         (referenceRun.artifact.nextAction ? 0.06 : 0) +
         Math.min(0.04, totalNodes * 0.01)
       );
+      pressure = Math.max(pressure, 0.985);
     } else if (referenceRun && (referenceRun.status === "pending" || referenceRun.status === "executing")) {
       pressure = clamp01(
         0.48 +
@@ -2688,9 +2756,7 @@ async function startServer() {
       : hasRunLatency
         ? "run"
         : null;
-    const stageBoost = observabilityStage === "verified"
-      ? 0.04
-      : observabilityStage === "executing"
+    const stageBoost = observabilityStage === "executing"
         ? 0.03
         : observabilityStage === "primed"
           ? 0.025
