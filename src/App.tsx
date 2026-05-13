@@ -602,7 +602,7 @@ export default function App() {
         <nav className="flex items-center gap-12 text-[10px] uppercase tracking-[0.25em] font-bold text-white/40">
           <TabButton active={activeTab === 'intent'} onClick={() => setActiveTab('intent')} label="Signal Feed" />
           <TabButton active={activeTab === 'execution'} onClick={() => setActiveTab('execution')} label="Probability Matrix" />
-          <TabButton active={activeTab === 'ops'} onClick={() => setActiveTab('ops')} label="Deterministic Ops" />
+          <TabButton active={activeTab === 'ops'} onClick={() => setActiveTab('ops')} label="Veklom Hub" />
           
           <div className="h-8 w-px bg-white/5 mx-2" />
           
@@ -706,54 +706,6 @@ export default function App() {
                     <h1 className="font-serif italic text-5xl text-white/90 leading-tight">
                       "Probability is merely the shadow of a hidden order."
                     </h1>
-                  </div>
-
-                  <div className="w-full glass-panel border border-white/10 rounded-xl p-4 text-left">
-                    <div className="flex items-center justify-between gap-4 mb-3">
-                      <div>
-                        <div className="text-[9px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Model Router</div>
-                        <div className="mt-1 text-xs text-white/50">
-                          {availableModels.length} live model routes available
-                          {modelCatalog.length > availableModels.length ? ` / ${modelCatalog.length} cataloged` : ""}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[9px] uppercase tracking-[0.2em] text-white/30 font-mono">Selected</div>
-                        <div className="mt-1 text-xs text-white/80">{selectedModel?.label || providerLabel}</div>
-                      </div>
-                    </div>
-                    <select
-                      value={selectedModelId}
-                      onChange={(event) => setSelectedModelId(event.target.value)}
-                      className="w-full bg-black/80 border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-400/70"
-                    >
-                      {availableModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.providerLabel} - {model.label} [{model.tier}]
-                        </option>
-                      ))}
-                    </select>
-                    <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-                      {modelCatalog.slice(0, 16).map((model) => (
-                        <button
-                          key={model.id}
-                          type="button"
-                          disabled={!model.available}
-                          onClick={() => model.available && setSelectedModelId(model.id)}
-                          className={`rounded-lg border px-3 py-2 text-left transition-all ${
-                            selectedModelId === model.id
-                              ? "border-blue-400 bg-blue-500/15 text-white"
-                              : model.available
-                                ? "border-white/10 bg-white/[0.03] text-white/70 hover:border-white/25"
-                                : "border-white/5 bg-white/[0.01] text-white/20"
-                          }`}
-                          title={model.useCase}
-                        >
-                          <div className="text-[8px] uppercase tracking-[0.2em] font-mono">{model.providerLabel}</div>
-                          <div className="mt-1 truncate text-[10px]">{model.label}</div>
-                        </button>
-                      ))}
-                    </div>
                   </div>
 
                   <div className="w-full relative group">
@@ -986,8 +938,8 @@ export default function App() {
               >
                 <div className="flex justify-between items-end mb-12 border-b border-white/5 pb-6">
                    <div className="space-y-1">
-                    <h2 className="font-serif italic text-3xl text-white/90">Archives of Order</h2>
-                    <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Live Execution Telemetry</p>
+                    <h2 className="font-serif italic text-3xl text-white/90">Veklom Hub</h2>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Models, playground routes, and live execution telemetry</p>
                    </div>
                    <div className="flex items-center gap-4 text-right">
                     <div className="flex flex-col">
@@ -1009,6 +961,54 @@ export default function App() {
                       <span className="text-xs font-mono text-purple-400">{signals?.quantum_coherence?.toFixed(1) || '0'}%</span>
                     </div>
                    </div>
+                </div>
+
+                <div className="glass-panel border border-white/10 rounded-xl p-5 mb-8">
+                  <div className="flex items-center justify-between gap-4 mb-4">
+                    <div>
+                      <div className="text-[9px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Veklom Model Playground</div>
+                      <div className="mt-1 text-xs text-white/50">
+                        {availableModels.length} live model routes available
+                        {modelCatalog.length > availableModels.length ? ` / ${modelCatalog.length} cataloged` : ""}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[9px] uppercase tracking-[0.2em] text-white/30 font-mono">Active Route</div>
+                      <div className="mt-1 text-xs text-white/80">{selectedModel?.label || providerLabel}</div>
+                    </div>
+                  </div>
+                  <select
+                    value={selectedModelId}
+                    onChange={(event) => setSelectedModelId(event.target.value)}
+                    className="w-full bg-black/80 border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-400/70"
+                  >
+                    {availableModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.providerLabel} - {model.label} [{model.tier}]
+                      </option>
+                    ))}
+                  </select>
+                  <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
+                    {modelCatalog.slice(0, 16).map((model) => (
+                      <button
+                        key={model.id}
+                        type="button"
+                        disabled={!model.available}
+                        onClick={() => model.available && setSelectedModelId(model.id)}
+                        className={`rounded-lg border px-3 py-2 text-left transition-all ${
+                          selectedModelId === model.id
+                            ? "border-blue-400 bg-blue-500/15 text-white"
+                            : model.available
+                              ? "border-white/10 bg-white/[0.03] text-white/70 hover:border-white/25"
+                              : "border-white/5 bg-white/[0.01] text-white/20"
+                        }`}
+                        title={model.useCase}
+                      >
+                        <div className="text-[8px] uppercase tracking-[0.2em] font-mono">{model.providerLabel}</div>
+                        <div className="mt-1 truncate text-[10px]">{model.label}</div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar space-y-8 pr-6">
