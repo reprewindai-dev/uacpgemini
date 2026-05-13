@@ -616,14 +616,14 @@ export default function App() {
       </header>
 
       {/* Main Content Workspace */}
-      <main className={`flex-1 grid gap-1 p-1 bg-white/5 overflow-hidden ${blackBoxMode ? "grid-cols-1" : "grid-cols-12"}`}>
+      <main className={`uacp-workspace flex-1 grid gap-1 p-1 bg-white/5 overflow-hidden ${blackBoxMode ? "grid-cols-1" : "grid-cols-12"}`}>
         
         {/* Left Column: Research Signals & Event Log */}
         <section
           aria-hidden={blackBoxMode}
           className={blackBoxMode
             ? "w-0 min-w-0 max-w-0 overflow-hidden opacity-0 pointer-events-none border-0 p-0 m-0"
-            : "col-span-3 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel"}
+            : "col-span-3 min-w-0 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel"}
         >
           <div className="p-6 border-b border-white/5 bg-gradient-to-b from-white/[0.02] to-transparent">
             <h2 className="text-[10px] uppercase tracking-[0.2em] text-blue-400 font-bold mb-1 flex items-center gap-2">
@@ -693,7 +693,7 @@ export default function App() {
         </section>
 
         {/* Center Panel: Hero Interaction Surface */}
-        <section className={`${blackBoxMode ? "col-span-1" : "col-span-6"} flex flex-col bg-[#080808] border border-white/5 overflow-hidden technical-grid relative`}>
+        <section className={`${blackBoxMode ? "col-span-1" : "col-span-6"} min-w-0 flex flex-col bg-[#080808] border border-white/5 overflow-hidden technical-grid relative`}>
           <AnimatePresence mode="wait">
             {activeTab === 'intent' && (
               <motion.div 
@@ -786,7 +786,7 @@ export default function App() {
               <motion.div 
                 key="execution"
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="flex-1 flex flex-col p-8 pb-32 overflow-y-auto custom-scrollbar"
+                className="flex-1 min-h-0 flex flex-col p-8 pb-32 overflow-y-auto overflow-x-hidden custom-scrollbar"
               >
                 <div className="flex justify-between items-center mb-12 border-b border-white/5 pb-6">
                    <div className="space-y-1">
@@ -839,18 +839,18 @@ export default function App() {
 
                 <div
                   ref={executionViewportRef}
-                  className="flex-1 overflow-x-auto overflow-y-hidden custom-scrollbar p-12"
+                  className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden custom-scrollbar p-6"
                 >
                    {activePlan ? (
-                     <div className="flex min-w-max items-start gap-12 relative animate-in fade-in duration-700">
+                     <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] items-start gap-5 relative animate-in fade-in duration-700">
                         {activePlan.graph?.nodes?.map((node: any, idx: number) => (
-                          <div key={`${node.id}-${idx}`} className="relative group shrink-0">
+                          <div key={`${node.id}-${idx}`} className="relative group min-w-0">
                             <motion.div 
                               initial={{ y: 20, opacity: 0 }}
                               animate={{ y: 0, opacity: 1 }}
                               transition={{ delay: idx * 0.1 }}
                               whileHover={{ scale: 1.05 }}
-                              className="w-64 p-8 glass-panel rounded-lg shadow-2xl relative z-10 hover:border-blue-500/50 transition-all border-white/10 group-hover:shadow-blue-500/20 backdrop-blur-xl group cursor-crosshair"
+                              className="w-full min-w-0 p-6 glass-panel rounded-lg shadow-2xl relative z-10 hover:border-blue-500/50 transition-all border-white/10 group-hover:shadow-blue-500/20 backdrop-blur-xl group cursor-crosshair"
                             >
                                {/* Quantum Shimmer Effect */}
                                <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 via-transparent to-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
@@ -1169,7 +1169,7 @@ export default function App() {
           aria-hidden={blackBoxMode}
           className={blackBoxMode
             ? "w-0 min-w-0 max-w-0 overflow-hidden opacity-0 pointer-events-none border-0 p-0 m-0"
-            : "col-span-3 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel"}
+            : "col-span-3 min-w-0 bg-[#0a0a0a] flex flex-col border border-white/5 overflow-hidden glass-panel"}
         >
            <div className="p-6 border-b border-white/5 bg-gradient-to-b from-white/[0.02] to-transparent">
               <h2 className="text-[10px] uppercase tracking-[0.2em] text-purple-400 font-bold mb-1 flex items-center gap-2">
@@ -1353,8 +1353,8 @@ export default function App() {
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-              <div className="grid grid-cols-12 gap-6 p-6">
-              <div className="col-span-7 space-y-6">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6">
+              <div className="lg:col-span-7 space-y-6 min-w-0">
                 <ArtifactSection title="Original Intent">
                   <p className="text-sm text-white/80 leading-relaxed">{selectedArtifactRun.artifact.originalIntent}</p>
                 </ArtifactSection>
@@ -1502,7 +1502,7 @@ export default function App() {
                 </ArtifactSection>
               </div>
 
-              <div className="col-span-5 space-y-6">
+              <div className="lg:col-span-5 space-y-6 min-w-0">
                 <ArtifactSection title="Node List">
                   <div className="space-y-3">
                     {selectedArtifactRun.artifact.nodeList.map((node, index) => (
@@ -1574,7 +1574,7 @@ export default function App() {
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-              <div className="grid grid-cols-2 gap-0">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-0">
               <div className="p-6 border-r border-white/10 space-y-6">
                 <div className="space-y-2">
                   <span className="text-[9px] uppercase tracking-[0.3em] text-white/25 font-mono">Intent</span>
