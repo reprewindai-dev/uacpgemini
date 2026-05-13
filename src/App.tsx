@@ -155,6 +155,7 @@ interface ModelCatalogItem {
   model: string;
   label: string;
   tier: "fast" | "balanced" | "premium" | "research" | "local";
+  accessTier: "free" | "pro" | "premium" | "enterprise";
   useCase: string;
   configured: boolean;
   available: boolean;
@@ -984,7 +985,7 @@ export default function App() {
                   >
                     {availableModels.map((model) => (
                       <option key={model.id} value={model.id}>
-                        {model.providerLabel} - {model.label} [{model.tier}]
+                        {model.providerLabel} - {model.label} [{model.accessTier} / {model.tier}]
                       </option>
                     ))}
                   </select>
@@ -1003,10 +1004,11 @@ export default function App() {
                               : "border-white/5 bg-white/[0.01] text-white/20"
                         }`}
                         title={model.useCase}
-                      >
-                        <div className="text-[8px] uppercase tracking-[0.2em] font-mono">{model.providerLabel}</div>
-                        <div className="mt-1 truncate text-[10px]">{model.label}</div>
-                      </button>
+                        >
+                          <div className="text-[8px] uppercase tracking-[0.2em] font-mono">{model.providerLabel}</div>
+                          <div className="mt-1 truncate text-[10px]">{model.label}</div>
+                          <div className="mt-1 text-[8px] uppercase tracking-[0.16em] text-white/30">{model.accessTier}</div>
+                        </button>
                     ))}
                   </div>
                 </div>

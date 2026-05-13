@@ -258,7 +258,7 @@ interface SessionStatusResponse {
   publicDemo?: boolean;
 }
 
-type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
+type ModelProvider = "openai" | "azure_openai" | "anthropic" | "mistral" | "cohere" | "xai" | "openrouter" | "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
 type ModelOperation = "plan_compile" | "artifact_compile";
 type SelectableModelProvider = Exclude<ModelProvider, "fallback">;
 
@@ -276,6 +276,7 @@ interface ModelCatalogItem {
   model: string;
   label: string;
   tier: "fast" | "balanced" | "premium" | "research" | "local";
+  accessTier: "free" | "pro" | "premium" | "enterprise";
   useCase: string;
   configured: boolean;
   available: boolean;
@@ -741,6 +742,100 @@ function getGroqConfig() {
   };
 }
 
+function getOpenAIConfig() {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    baseUrl: process.env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1",
+    model: process.env.OPENAI_MODEL?.trim() || "gpt-5.5",
+  };
+}
+
+function getAzureOpenAIConfig() {
+  const apiKey = process.env.AZURE_OPENAI_API_KEY?.trim();
+  const endpoint = process.env.AZURE_OPENAI_ENDPOINT?.trim();
+  const deployment = process.env.AZURE_OPENAI_DEPLOYMENT?.trim();
+  if (!apiKey || !endpoint || !deployment) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    endpoint,
+    deployment,
+    apiVersion: process.env.AZURE_OPENAI_API_VERSION?.trim() || "2025-01-01-preview",
+  };
+}
+
+function getAnthropicConfig() {
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    baseUrl: process.env.ANTHROPIC_BASE_URL?.trim() || "https://api.anthropic.com",
+    model: process.env.ANTHROPIC_MODEL?.trim() || "claude-sonnet-4-6",
+  };
+}
+
+function getMistralConfig() {
+  const apiKey = process.env.MISTRAL_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    baseUrl: process.env.MISTRAL_BASE_URL?.trim() || "https://api.mistral.ai/v1",
+    model: process.env.MISTRAL_MODEL?.trim() || "mistral-medium-3.5",
+  };
+}
+
+function getCohereConfig() {
+  const apiKey = process.env.COHERE_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    baseUrl: process.env.COHERE_BASE_URL?.trim() || "https://api.cohere.com/v2",
+    model: process.env.COHERE_MODEL?.trim() || "command-a-03-2025",
+  };
+}
+
+function getXaiConfig() {
+  const apiKey = process.env.XAI_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    baseUrl: process.env.XAI_BASE_URL?.trim() || "https://api.x.ai/v1",
+    model: process.env.XAI_MODEL?.trim() || "grok-4",
+  };
+}
+
+function getOpenRouterConfig() {
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    baseUrl: process.env.OPENROUTER_BASE_URL?.trim() || "https://openrouter.ai/api/v1",
+    model: process.env.OPENROUTER_MODEL?.trim() || "openai/gpt-5-mini",
+  };
+}
+
 function getHuggingFaceConfig() {
   const token = process.env.HF_TOKEN?.trim();
   if (!token) {
@@ -1040,6 +1135,25 @@ function cleanModelText(text: string) {
 
 function normalizeProviderName(value: string | undefined | null): ModelProvider | null {
   switch ((value || "").trim().toLowerCase()) {
+    case "openai":
+      return "openai";
+    case "azure_openai":
+    case "azure-openai":
+    case "azure":
+      return "azure_openai";
+    case "anthropic":
+    case "claude":
+      return "anthropic";
+    case "mistral":
+      return "mistral";
+    case "cohere":
+      return "cohere";
+    case "xai":
+    case "x_ai":
+    case "grok":
+      return "xai";
+    case "openrouter":
+      return "openrouter";
     case "groq":
       return "groq";
     case "huggingface":
@@ -1067,6 +1181,13 @@ function getProviderOrder(modelOverride?: ModelCatalogItem | null): ModelProvide
   return [...new Set<ModelProvider>([
     ...(modelOverride ? [modelOverride.provider] : []),
     ...envPreferred,
+    "openai",
+    "azure_openai",
+    "anthropic",
+    "mistral",
+    "cohere",
+    "xai",
+    "openrouter",
     "groq",
     "huggingface",
     "gemini",
@@ -1080,6 +1201,20 @@ function getConfiguredProviders() {
 
 function formatProviderLabel(provider: ModelProvider) {
   switch (provider) {
+    case "openai":
+      return "OpenAI";
+    case "azure_openai":
+      return "Azure OpenAI";
+    case "anthropic":
+      return "Anthropic";
+    case "mistral":
+      return "Mistral";
+    case "cohere":
+      return "Cohere";
+    case "xai":
+      return "xAI";
+    case "openrouter":
+      return "OpenRouter";
     case "groq":
       return "Groq";
     case "huggingface":
@@ -1094,25 +1229,57 @@ function formatProviderLabel(provider: ModelProvider) {
 }
 
 const MODEL_CATALOG_BASE: Array<Omit<ModelCatalogItem, "providerLabel" | "configured" | "available">> = [
-  { id: "groq-llama-3.1-8b-instant", provider: "groq", model: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant", tier: "fast", useCase: "Low-latency plans, short governance drafts, fast playground work." },
-  { id: "groq-llama-3.3-70b-versatile", provider: "groq", model: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile", tier: "premium", useCase: "Higher quality open-model reasoning and plan synthesis." },
-  { id: "groq-gemma2-9b-it", provider: "groq", model: "gemma2-9b-it", label: "Gemma 2 9B IT", tier: "fast", useCase: "Fast instruction following and compact summaries." },
-  { id: "groq-deepseek-r1-distill-llama-70b", provider: "groq", model: "deepseek-r1-distill-llama-70b", label: "DeepSeek R1 Distill 70B", tier: "research", useCase: "Structured reasoning, counter-arguments, and research critique." },
-  { id: "groq-qwen-qwq-32b", provider: "groq", model: "qwen-qwq-32b", label: "Qwen QwQ 32B", tier: "research", useCase: "Math-heavy and technical planning tasks." },
-  { id: "gemini-3-flash-preview", provider: "gemini", model: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", tier: "balanced", useCase: "Default Gemini route for fast multimodal-ready synthesis." },
-  { id: "gemini-2.5-flash", provider: "gemini", model: "gemini-2.5-flash", label: "Gemini 2.5 Flash", tier: "fast", useCase: "Fast drafting, policy expansion, and artifact compilation." },
-  { id: "gemini-2.5-pro", provider: "gemini", model: "gemini-2.5-pro", label: "Gemini 2.5 Pro", tier: "premium", useCase: "Premium reasoning and careful governance documents." },
-  { id: "hf-llama-3.1-8b-fastest", provider: "huggingface", model: "meta-llama/Llama-3.1-8B-Instruct:fastest", label: "HF Llama 3.1 8B Fastest", tier: "fast", useCase: "Router-backed open-model fallback." },
-  { id: "hf-mistral-7b", provider: "huggingface", model: "mistralai/Mistral-7B-Instruct-v0.3:fastest", label: "HF Mistral 7B", tier: "balanced", useCase: "Instruction tasks and concise operations copy." },
-  { id: "hf-qwen2.5-7b", provider: "huggingface", model: "Qwen/Qwen2.5-7B-Instruct:fastest", label: "HF Qwen 2.5 7B", tier: "balanced", useCase: "Technical planning and schema-oriented responses." },
-  { id: "hf-qwen2.5-coder-7b", provider: "huggingface", model: "Qwen/Qwen2.5-Coder-7B-Instruct:fastest", label: "HF Qwen Coder 7B", tier: "research", useCase: "Code-aware plans and implementation reasoning." },
-  { id: "ollama-qwen2.5-7b", provider: "ollama", model: "qwen2.5:7b", label: "Local Qwen 2.5 7B", tier: "local", useCase: "Private local-only runs when a real Ollama runtime exists." },
-  { id: "ollama-llama3.1-8b", provider: "ollama", model: "llama3.1:8b", label: "Local Llama 3.1 8B", tier: "local", useCase: "Local fallback for private CPU/GPU nodes." },
-  { id: "ollama-mistral-7b", provider: "ollama", model: "mistral:7b", label: "Local Mistral 7B", tier: "local", useCase: "Local low-cost instruction path." },
+  { id: "groq-llama-3.1-8b-instant", provider: "groq", model: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant", tier: "fast", accessTier: "free", useCase: "Low-latency plans, short governance drafts, fast playground work." },
+  { id: "groq-gemma2-9b-it", provider: "groq", model: "gemma2-9b-it", label: "Gemma 2 9B IT", tier: "fast", accessTier: "free", useCase: "Fast instruction following and compact summaries." },
+  { id: "hf-llama-3.1-8b-fastest", provider: "huggingface", model: "meta-llama/Llama-3.1-8B-Instruct:fastest", label: "HF Llama 3.1 8B Fastest", tier: "fast", accessTier: "free", useCase: "Router-backed open-model fallback." },
+  { id: "hf-mistral-7b", provider: "huggingface", model: "mistralai/Mistral-7B-Instruct-v0.3:fastest", label: "HF Mistral 7B", tier: "balanced", accessTier: "free", useCase: "Instruction tasks and concise operations copy." },
+  { id: "openai-gpt-5-mini", provider: "openai", model: "gpt-5-mini", label: "GPT-5 mini", tier: "balanced", accessTier: "pro", useCase: "Cost-sensitive OpenAI BYOK planning and support workflows." },
+  { id: "openai-gpt-5-nano", provider: "openai", model: "gpt-5-nano", label: "GPT-5 nano", tier: "fast", accessTier: "free", useCase: "High-volume lightweight OpenAI BYOK tasks." },
+  { id: "openai-gpt-4.1", provider: "openai", model: "gpt-4.1", label: "GPT-4.1", tier: "balanced", accessTier: "pro", useCase: "General OpenAI BYOK instruction and non-reasoning work." },
+  { id: "openai-gpt-5.4", provider: "openai", model: "gpt-5.4", label: "GPT-5.4", tier: "premium", accessTier: "premium", useCase: "Premium OpenAI BYOK coding and professional work." },
+  { id: "openai-gpt-5.5", provider: "openai", model: "gpt-5.5", label: "GPT-5.5", tier: "premium", accessTier: "premium", useCase: "Top-end OpenAI BYOK professional reasoning and coding." },
+  { id: "openai-gpt-5.5-pro", provider: "openai", model: "gpt-5.5-pro", label: "GPT-5.5 Pro", tier: "premium", accessTier: "premium", useCase: "Highest precision OpenAI BYOK work where latency is less important." },
+  { id: "azure-openai-deployment", provider: "azure_openai", model: "deployment", label: "Azure OpenAI Deployment", tier: "premium", accessTier: "enterprise", useCase: "Hospital, bank, and insurer deployments requiring Azure controls and regional governance." },
+  { id: "anthropic-claude-haiku-4.5", provider: "anthropic", model: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", tier: "fast", accessTier: "pro", useCase: "Fast Claude BYOK workflows and lightweight agent tasks." },
+  { id: "anthropic-claude-sonnet-4.6", provider: "anthropic", model: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", tier: "premium", accessTier: "premium", useCase: "Balanced Claude reasoning, coding, and enterprise analysis." },
+  { id: "anthropic-claude-opus-4.7", provider: "anthropic", model: "claude-opus-4-7", label: "Claude Opus 4.7", tier: "premium", accessTier: "premium", useCase: "Highest-capability Claude BYOK reasoning and agentic coding." },
+  { id: "mistral-medium-3.5", provider: "mistral", model: "mistral-medium-3.5", label: "Mistral Medium 3.5", tier: "premium", accessTier: "premium", useCase: "Mistral BYOK multimodal, coding, and agentic workflows." },
+  { id: "mistral-devstral-2", provider: "mistral", model: "devstral-2", label: "Devstral 2", tier: "research", accessTier: "pro", useCase: "Code-heavy Mistral BYOK tasks." },
+  { id: "cohere-command-a", provider: "cohere", model: "command-a-03-2025", label: "Command A", tier: "premium", accessTier: "enterprise", useCase: "Enterprise RAG, multilingual, and tool-use workflows." },
+  { id: "cohere-command-a-reasoning", provider: "cohere", model: "command-a-reasoning-08-2025", label: "Command A Reasoning", tier: "research", accessTier: "enterprise", useCase: "Enterprise reasoning and regulated multi-step workflows." },
+  { id: "cohere-command-r7b", provider: "cohere", model: "command-r7b-12-2024", label: "Command R7B", tier: "fast", accessTier: "pro", useCase: "Fast RAG and tool-using workflows." },
+  { id: "xai-grok-4", provider: "xai", model: "grok-4", label: "Grok 4", tier: "premium", accessTier: "premium", useCase: "xAI BYOK reasoning and real-time style analysis." },
+  { id: "openrouter-gpt-5-mini", provider: "openrouter", model: "openai/gpt-5-mini", label: "OpenRouter GPT-5 mini", tier: "balanced", accessTier: "pro", useCase: "BYOK marketplace route through OpenRouter." },
+  { id: "openrouter-claude-sonnet", provider: "openrouter", model: "anthropic/claude-sonnet-4.6", label: "OpenRouter Claude Sonnet", tier: "premium", accessTier: "premium", useCase: "OpenRouter Claude-compatible premium route." },
+  { id: "groq-llama-3.3-70b-versatile", provider: "groq", model: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile", tier: "premium", accessTier: "pro", useCase: "Higher quality open-model reasoning and plan synthesis." },
+  { id: "groq-deepseek-r1-distill-llama-70b", provider: "groq", model: "deepseek-r1-distill-llama-70b", label: "DeepSeek R1 Distill 70B", tier: "research", accessTier: "pro", useCase: "Structured reasoning, counter-arguments, and research critique." },
+  { id: "groq-qwen-qwq-32b", provider: "groq", model: "qwen-qwq-32b", label: "Qwen QwQ 32B", tier: "research", accessTier: "pro", useCase: "Math-heavy and technical planning tasks." },
+  { id: "gemini-3-flash-preview", provider: "gemini", model: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", tier: "balanced", accessTier: "pro", useCase: "Default Gemini route for fast multimodal-ready synthesis." },
+  { id: "gemini-2.5-flash", provider: "gemini", model: "gemini-2.5-flash", label: "Gemini 2.5 Flash", tier: "fast", accessTier: "free", useCase: "Fast drafting, policy expansion, and artifact compilation." },
+  { id: "gemini-2.5-pro", provider: "gemini", model: "gemini-2.5-pro", label: "Gemini 2.5 Pro", tier: "premium", accessTier: "premium", useCase: "Premium reasoning and careful governance documents." },
+  { id: "hf-qwen2.5-7b", provider: "huggingface", model: "Qwen/Qwen2.5-7B-Instruct:fastest", label: "HF Qwen 2.5 7B", tier: "balanced", accessTier: "free", useCase: "Technical planning and schema-oriented responses." },
+  { id: "hf-qwen2.5-coder-7b", provider: "huggingface", model: "Qwen/Qwen2.5-Coder-7B-Instruct:fastest", label: "HF Qwen Coder 7B", tier: "research", accessTier: "pro", useCase: "Code-aware plans and implementation reasoning." },
+  { id: "ollama-qwen2.5-7b", provider: "ollama", model: "qwen2.5:7b", label: "Local Qwen 2.5 7B", tier: "local", accessTier: "free", useCase: "Private local-only runs when a real Ollama runtime exists." },
+  { id: "ollama-llama3.1-8b", provider: "ollama", model: "llama3.1:8b", label: "Local Llama 3.1 8B", tier: "local", accessTier: "free", useCase: "Local fallback for private CPU/GPU nodes." },
+  { id: "ollama-mistral-7b", provider: "ollama", model: "mistral:7b", label: "Local Mistral 7B", tier: "local", accessTier: "free", useCase: "Local low-cost instruction path." },
 ];
 
 function isProviderCredentialed(provider: SelectableModelProvider) {
   switch (provider) {
+    case "openai":
+      return getOpenAIConfig() !== null;
+    case "azure_openai":
+      return getAzureOpenAIConfig() !== null;
+    case "anthropic":
+      return getAnthropicConfig() !== null;
+    case "mistral":
+      return getMistralConfig() !== null;
+    case "cohere":
+      return getCohereConfig() !== null;
+    case "xai":
+      return getXaiConfig() !== null;
+    case "openrouter":
+      return getOpenRouterConfig() !== null;
     case "groq":
       return getGroqConfig() !== null;
     case "huggingface":
@@ -1171,6 +1338,20 @@ function recordLatency(provider: ModelProvider, operation: ModelOperation, durat
 
 function isProviderConfigured(provider: ModelProvider) {
   switch (provider) {
+    case "openai":
+      return getOpenAIConfig() !== null;
+    case "azure_openai":
+      return getAzureOpenAIConfig() !== null;
+    case "anthropic":
+      return getAnthropicConfig() !== null;
+    case "mistral":
+      return getMistralConfig() !== null;
+    case "cohere":
+      return getCohereConfig() !== null;
+    case "xai":
+      return getXaiConfig() !== null;
+    case "openrouter":
+      return getOpenRouterConfig() !== null;
     case "groq":
       return getGroqConfig() !== null;
     case "huggingface":
@@ -1184,6 +1365,166 @@ function isProviderConfigured(provider: ModelProvider) {
     default:
       return false;
   }
+}
+
+async function requestOpenAICompatible(
+  provider: "openai" | "mistral" | "xai" | "openrouter",
+  label: string,
+  config: { apiKey: string; baseUrl: string; model: string },
+  prompt: string,
+  expectJson: boolean,
+  operation: ModelOperation,
+  modelOverride?: ModelCatalogItem | null
+) {
+  const startedAt = Date.now();
+  const response = await fetchWithTimeout(`${config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.apiKey}`,
+      ...(provider === "openrouter" ? {
+        "HTTP-Referer": process.env.PUBLIC_APP_URL || "https://uacpgemini.onrender.com",
+        "X-Title": "Veklom UACP",
+      } : {}),
+    },
+    body: JSON.stringify({
+      model: modelOverride?.provider === provider ? modelOverride.model : config.model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      response_format: expectJson ? { type: "json_object" } : undefined,
+    }),
+  }, `${label} request`);
+
+  if (!response.ok) {
+    throw new Error(`${label} request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error(`${label} returned an empty response`);
+  }
+
+  recordLatency(provider, operation, Date.now() - startedAt);
+  return { provider, text: cleanModelText(text) };
+}
+
+async function requestOpenAI(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
+  const openai = getOpenAIConfig();
+  if (!openai) {
+    throw new Error("OpenAI is not configured");
+  }
+
+  return requestOpenAICompatible("openai", "OpenAI", openai, prompt, expectJson, operation, modelOverride);
+}
+
+async function requestAzureOpenAI(prompt: string, expectJson: boolean, operation: ModelOperation) {
+  const azure = getAzureOpenAIConfig();
+  if (!azure) {
+    throw new Error("Azure OpenAI is not configured");
+  }
+
+  const startedAt = Date.now();
+  const endpoint = azure.endpoint.replace(/\/$/, "");
+  const response = await fetchWithTimeout(`${endpoint}/openai/deployments/${encodeURIComponent(azure.deployment)}/chat/completions?api-version=${encodeURIComponent(azure.apiVersion)}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-key": azure.apiKey,
+    },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      response_format: expectJson ? { type: "json_object" } : undefined,
+    }),
+  }, "Azure OpenAI request");
+
+  if (!response.ok) {
+    throw new Error(`Azure OpenAI request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error("Azure OpenAI returned an empty response");
+  }
+
+  recordLatency("azure_openai", operation, Date.now() - startedAt);
+  return { provider: "azure_openai" as const, text: cleanModelText(text) };
+}
+
+async function requestAnthropic(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
+  const anthropic = getAnthropicConfig();
+  if (!anthropic) {
+    throw new Error("Anthropic is not configured");
+  }
+
+  const startedAt = Date.now();
+  const response = await fetchWithTimeout(`${anthropic.baseUrl.replace(/\/$/, "")}/v1/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": anthropic.apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: modelOverride?.provider === "anthropic" ? modelOverride.model : anthropic.model,
+      max_tokens: 4096,
+      system: expectJson ? "Return only valid JSON. Do not include markdown fences." : undefined,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  }, "Anthropic request");
+
+  if (!response.ok) {
+    throw new Error(`Anthropic request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = Array.isArray(data?.content)
+    ? data.content.map((part: any) => typeof part?.text === "string" ? part.text : "").join("")
+    : "";
+  if (!text.trim()) {
+    throw new Error("Anthropic returned an empty response");
+  }
+
+  recordLatency("anthropic", operation, Date.now() - startedAt);
+  return { provider: "anthropic" as const, text: cleanModelText(text) };
+}
+
+async function requestCohere(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
+  const cohere = getCohereConfig();
+  if (!cohere) {
+    throw new Error("Cohere is not configured");
+  }
+
+  const startedAt = Date.now();
+  const response = await fetchWithTimeout(`${cohere.baseUrl.replace(/\/$/, "")}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${cohere.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelOverride?.provider === "cohere" ? modelOverride.model : cohere.model,
+      messages: [{ role: "user", content: expectJson ? `${prompt}\n\nReturn only valid JSON.` : prompt }],
+      temperature: 0.2,
+    }),
+  }, "Cohere request");
+
+  if (!response.ok) {
+    throw new Error(`Cohere request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = Array.isArray(data?.message?.content)
+    ? data.message.content.map((part: any) => typeof part?.text === "string" ? part.text : "").join("")
+    : "";
+  if (!text.trim()) {
+    throw new Error("Cohere returned an empty response");
+  }
+
+  recordLatency("cohere", operation, Date.now() - startedAt);
+  return { provider: "cohere" as const, text: cleanModelText(text) };
 }
 
 async function requestGroq(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
@@ -1327,6 +1668,20 @@ async function generateModelText(prompt: string, expectJson: boolean, operation:
 
     try {
       switch (provider) {
+        case "openai":
+          return await requestOpenAI(prompt, expectJson, operation, modelOverride);
+        case "azure_openai":
+          return await requestAzureOpenAI(prompt, expectJson, operation);
+        case "anthropic":
+          return await requestAnthropic(prompt, expectJson, operation, modelOverride);
+        case "mistral":
+          return await requestOpenAICompatible("mistral", "Mistral", getMistralConfig()!, prompt, expectJson, operation, modelOverride);
+        case "cohere":
+          return await requestCohere(prompt, expectJson, operation, modelOverride);
+        case "xai":
+          return await requestOpenAICompatible("xai", "xAI", getXaiConfig()!, prompt, expectJson, operation, modelOverride);
+        case "openrouter":
+          return await requestOpenAICompatible("openrouter", "OpenRouter", getOpenRouterConfig()!, prompt, expectJson, operation, modelOverride);
         case "groq":
           return await requestGroq(prompt, expectJson, operation, modelOverride);
         case "huggingface":
