@@ -323,6 +323,16 @@ const AUTH_PASSCODE = process.env.OPERATOR_PASSCODE?.trim() || "";
 const AUTH_SESSION_SECRET = process.env.AUTH_SESSION_SECRET?.trim() || "";
 const PUBLIC_DEMO_ENABLED = process.env.UACP_PUBLIC_DEMO_ENABLED !== "false";
 const PUBLIC_DEMO_ACTION_LIMIT = Number(process.env.UACP_PUBLIC_DEMO_ACTION_LIMIT || "1");
+const OWNER_EMAILS = new Set(
+  [
+    process.env.USER_EMAIL,
+    process.env.OWNER_EMAIL,
+    process.env.ADMIN_EMAIL,
+    ...(process.env.UACP_OWNER_EMAILS || "").split(","),
+  ]
+    .map((entry) => String(entry || "").trim().toLowerCase())
+    .filter(Boolean)
+);
 const PUBLIC_DEMO_READ_PATHS = new Set([
   "/bootstrap",
   "/plans",
@@ -438,6 +448,15 @@ function getClientFingerprint(req: express.Request) {
   return crypto.createHash("sha256").update(`${salt}:${ip}`).digest("hex").slice(0, 32);
 }
 
+function isOwnerRequest(req: express.Request) {
+  if (isRequestAuthenticated(req)) {
+    return true;
+  }
+
+  const email = String(req.header("x-uacp-user-email") || req.header("x-user-email") || "").trim().toLowerCase();
+  return Boolean(email && OWNER_EMAILS.has(email));
+}
+
 function getDemoUsage(req: express.Request) {
   const key = getClientFingerprint(req);
   if (!publicDemoUsage[key]) {
@@ -448,6 +467,10 @@ function getDemoUsage(req: express.Request) {
 
 function demoLimitExceeded(action: "planCompiles" | "runStarts", usage: AppState["publicDemoUsage"][string]) {
   return PUBLIC_DEMO_ACTION_LIMIT >= 0 && usage[action] >= PUBLIC_DEMO_ACTION_LIMIT;
+}
+
+function shouldApplyPublicDemoLimit(req: express.Request) {
+  return !isOwnerRequest(req);
 }
 
 function markDemoUsage(action: "planCompiles" | "runStarts", key: string) {
@@ -2894,7 +2917,8 @@ async function startServer() {
 
   app.post("/api/plans/compile", async (req, res) => {
     const { key, usage } = getDemoUsage(req);
-    if (demoLimitExceeded("planCompiles", usage)) {
+    const applyDemoLimit = shouldApplyPublicDemoLimit(req);
+    if (applyDemoLimit && demoLimitExceeded("planCompiles", usage)) {
       return sendDemoLimit(res, "planCompiles");
     }
 
@@ -2925,7 +2949,9 @@ async function startServer() {
       );
 
       plans.push(newPlan);
-      markDemoUsage("planCompiles", key);
+      if (applyDemoLimit) {
+        markDemoUsage("planCompiles", key);
+      }
       addEvent("PLAN_CREATED", `New plan created: ${newPlan.id} (${newPlan.name})`, {
         planId: newPlan.id,
         source: compiledPlan.provider,
@@ -2996,7 +3022,8 @@ async function startServer() {
 
   app.post("/api/runs", (req, res) => {
     const { key, usage } = getDemoUsage(req);
-    if (demoLimitExceeded("runStarts", usage)) {
+    const applyDemoLimit = shouldApplyPublicDemoLimit(req);
+    if (applyDemoLimit && demoLimitExceeded("runStarts", usage)) {
       return sendDemoLimit(res, "runStarts");
     }
 
@@ -3006,7 +3033,9 @@ async function startServer() {
 
     const newRun = createRunRecord(plan);
     runs.push(newRun);
-    markDemoUsage("runStarts", key);
+    if (applyDemoLimit) {
+      markDemoUsage("runStarts", key);
+    }
     addEvent('RUN_STARTED', `Execution run started for plan ${planId}`, { runId: newRun.id, planId });
     
     // Simulate execution
