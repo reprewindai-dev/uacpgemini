@@ -618,7 +618,7 @@ export default function App() {
       </header>
 
       {/* Main Content Workspace */}
-      <main className={`uacp-workspace flex-1 grid gap-1 p-1 bg-white/5 overflow-hidden ${blackBoxMode ? "grid-cols-1" : "grid-cols-12"}`}>
+      <main className={`flex-1 grid gap-1 p-1 bg-white/5 overflow-hidden ${blackBoxMode ? "grid-cols-1" : "grid-cols-12 uacp-workspace"}`}>
         
         {/* Left Column: Research Signals & Event Log */}
         <section
