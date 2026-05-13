@@ -156,6 +156,8 @@ interface ModelCatalogItem {
   label: string;
   tier: "fast" | "balanced" | "premium" | "research" | "local";
   accessTier: "free" | "pro" | "premium" | "enterprise";
+  modality?: "text" | "speech";
+  selectableForPlanCompile?: boolean;
   useCase: string;
   configured: boolean;
   available: boolean;
@@ -209,7 +211,7 @@ export default function App() {
   const executionViewportRef = useRef<HTMLDivElement | null>(null);
   const activePlan = plans[0];
   const latestArtifactRun = runs.find((run) => run.artifact) ?? null;
-  const availableModels = modelCatalog.filter((model) => model.available);
+  const availableModels = modelCatalog.filter((model) => model.available && model.selectableForPlanCompile !== false && (model.modality || "text") === "text");
   const selectedModel = modelCatalog.find((model) => model.id === selectedModelId) || availableModels[0] || null;
   const blackBoxMode = typeof window !== "undefined" && (
     new URLSearchParams(window.location.search).get("mode") === "blackbox" ||
@@ -285,7 +287,7 @@ export default function App() {
         setProviderChain(Array.isArray(bootstrap.providerChain) ? bootstrap.providerChain : []);
         const catalog = Array.isArray(bootstrap.modelCatalog) ? bootstrap.modelCatalog : [];
         setModelCatalog(catalog);
-        setSelectedModelId(catalog.find((model) => model.available)?.id || "");
+        setSelectedModelId(catalog.find((model) => model.available && model.selectableForPlanCompile !== false && (model.modality || "text") === "text")?.id || "");
         setResearchFeedSource(bootstrap.researchFeedSource || "arXiv");
         setAuthChecked(true);
         interval = setInterval(() => {
@@ -374,7 +376,7 @@ export default function App() {
       const res = await fetch("/api/plans/compile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ intent: trimmedIntent, modelId: selectedModelId || undefined }),
+        body: JSON.stringify({ intent: trimmedIntent, modelId: selectedModel?.id || undefined }),
       });
 
       const payload = await res.json();
@@ -603,7 +605,7 @@ export default function App() {
         <nav className="flex items-center gap-12 text-[10px] uppercase tracking-[0.25em] font-bold text-white/40">
           <TabButton active={activeTab === 'intent'} onClick={() => setActiveTab('intent')} label="Signal Feed" />
           <TabButton active={activeTab === 'execution'} onClick={() => setActiveTab('execution')} label="Probability Matrix" />
-          <TabButton active={activeTab === 'ops'} onClick={() => setActiveTab('ops')} label="Veklom Hub" />
+          <TabButton active={activeTab === 'ops'} onClick={() => setActiveTab('ops')} label="Deterministic Ops" />
           
           <div className="h-8 w-px bg-white/5 mx-2" />
           
@@ -708,6 +710,56 @@ export default function App() {
                       "Probability is merely the shadow of a hidden order."
                     </h1>
                   </div>
+
+                  {availableModels.length > 0 && (
+                    <div className="w-full glass-panel border border-white/10 rounded-xl p-5 text-left">
+                      <div className="flex items-center justify-between gap-4 mb-4">
+                        <div>
+                          <div className="text-[9px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Model Router</div>
+                          <div className="mt-1 text-xs text-white/50">
+                            {availableModels.length} live model routes available
+                            {modelCatalog.length > availableModels.length ? ` / ${modelCatalog.length} cataloged` : ""}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[9px] uppercase tracking-[0.2em] text-white/30 font-mono">Selected</div>
+                          <div className="mt-1 text-xs text-white/80">{selectedModel?.label || providerLabel}</div>
+                        </div>
+                      </div>
+                      <select
+                        value={selectedModelId}
+                        onChange={(event) => setSelectedModelId(event.target.value)}
+                        className="w-full bg-black/80 border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-400/70"
+                      >
+                        {availableModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.providerLabel} - {model.label} [{model.tier}]
+                          </option>
+                        ))}
+                      </select>
+                      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                        {modelCatalog.slice(0, 16).map((model) => (
+                          <button
+                            key={model.id}
+                            type="button"
+                            disabled={!model.available || model.selectableForPlanCompile === false || (model.modality || "text") !== "text"}
+                            onClick={() => model.available && model.selectableForPlanCompile !== false && (model.modality || "text") === "text" && setSelectedModelId(model.id)}
+                            className={`rounded-lg border px-3 py-2 text-left transition-all ${
+                              selectedModelId === model.id
+                                ? "border-blue-400 bg-blue-500/15 text-white"
+                                : model.available && model.selectableForPlanCompile !== false && (model.modality || "text") === "text"
+                                  ? "border-white/10 bg-white/[0.03] text-white/70 hover:border-white/25"
+                                  : "border-white/5 bg-white/[0.01] text-white/20"
+                            }`}
+                            title={model.useCase}
+                          >
+                            <div className="text-[8px] uppercase tracking-[0.2em] font-mono">{model.providerLabel}</div>
+                            <div className="mt-1 truncate text-[10px]">{model.label}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="w-full relative group">
                     <div className="absolute -inset-1 bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-indigo-500/10 rounded-xl blur-xl opacity-0 group-focus-within:opacity-100 transition duration-1000" />
@@ -939,8 +991,8 @@ export default function App() {
               >
                 <div className="flex justify-between items-end mb-12 border-b border-white/5 pb-6">
                    <div className="space-y-1">
-                    <h2 className="font-serif italic text-3xl text-white/90">Veklom Hub</h2>
-                    <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Models, playground routes, and live execution telemetry</p>
+                    <h2 className="font-serif italic text-3xl text-white/90">Archives of Order</h2>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Live Execution Telemetry</p>
                    </div>
                    <div className="flex items-center gap-4 text-right">
                     <div className="flex flex-col">
@@ -962,55 +1014,6 @@ export default function App() {
                       <span className="text-xs font-mono text-purple-400">{signals?.quantum_coherence?.toFixed(1) || '0'}%</span>
                     </div>
                    </div>
-                </div>
-
-                <div className="glass-panel border border-white/10 rounded-xl p-5 mb-8">
-                  <div className="flex items-center justify-between gap-4 mb-4">
-                    <div>
-                      <div className="text-[9px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Veklom Model Playground</div>
-                      <div className="mt-1 text-xs text-white/50">
-                        {availableModels.length} live model routes available
-                        {modelCatalog.length > availableModels.length ? ` / ${modelCatalog.length} cataloged` : ""}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-[9px] uppercase tracking-[0.2em] text-white/30 font-mono">Active Route</div>
-                      <div className="mt-1 text-xs text-white/80">{selectedModel?.label || providerLabel}</div>
-                    </div>
-                  </div>
-                  <select
-                    value={selectedModelId}
-                    onChange={(event) => setSelectedModelId(event.target.value)}
-                    className="w-full bg-black/80 border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-400/70"
-                  >
-                    {availableModels.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.providerLabel} - {model.label} [{model.accessTier} / {model.tier}]
-                      </option>
-                    ))}
-                  </select>
-                  <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
-                    {modelCatalog.slice(0, 16).map((model) => (
-                      <button
-                        key={model.id}
-                        type="button"
-                        disabled={!model.available}
-                        onClick={() => model.available && setSelectedModelId(model.id)}
-                        className={`rounded-lg border px-3 py-2 text-left transition-all ${
-                          selectedModelId === model.id
-                            ? "border-blue-400 bg-blue-500/15 text-white"
-                            : model.available
-                              ? "border-white/10 bg-white/[0.03] text-white/70 hover:border-white/25"
-                              : "border-white/5 bg-white/[0.01] text-white/20"
-                        }`}
-                        title={model.useCase}
-                        >
-                          <div className="text-[8px] uppercase tracking-[0.2em] font-mono">{model.providerLabel}</div>
-                          <div className="mt-1 truncate text-[10px]">{model.label}</div>
-                          <div className="mt-1 text-[8px] uppercase tracking-[0.16em] text-white/30">{model.accessTier}</div>
-                        </button>
-                    ))}
-                  </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar space-y-8 pr-6">

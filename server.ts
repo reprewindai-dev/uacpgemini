@@ -277,6 +277,8 @@ interface ModelCatalogItem {
   label: string;
   tier: "fast" | "balanced" | "premium" | "research" | "local";
   accessTier: "free" | "pro" | "premium" | "enterprise";
+  modality?: "text" | "speech";
+  selectableForPlanCompile?: boolean;
   useCase: string;
   configured: boolean;
   available: boolean;
@@ -1282,6 +1284,7 @@ const MODEL_CATALOG_BASE: Array<Omit<ModelCatalogItem, "providerLabel" | "config
   { id: "gemini-2.5-pro", provider: "gemini", model: "gemini-2.5-pro", label: "Gemini 2.5 Pro", tier: "premium", accessTier: "premium", useCase: "Premium reasoning and careful governance documents." },
   { id: "hf-qwen2.5-7b", provider: "huggingface", model: "Qwen/Qwen2.5-7B-Instruct:fastest", label: "HF Qwen 2.5 7B", tier: "balanced", accessTier: "free", useCase: "Technical planning and schema-oriented responses." },
   { id: "hf-qwen2.5-coder-7b", provider: "huggingface", model: "Qwen/Qwen2.5-Coder-7B-Instruct:fastest", label: "HF Qwen Coder 7B", tier: "research", accessTier: "pro", useCase: "Code-aware plans and implementation reasoning." },
+  { id: "hf-kokoro-82m-tts", provider: "huggingface", model: "hexgrad/Kokoro-82M", label: "HF Kokoro 82M Voice", tier: "fast", accessTier: "pro", modality: "speech", selectableForPlanCompile: false, useCase: "Text-to-speech route for talking surfaces and voice playback; not used for V2 plan compilation." },
   { id: "ollama-qwen2.5-7b", provider: "ollama", model: "qwen2.5:7b", label: "Local Qwen 2.5 7B", tier: "local", accessTier: "free", useCase: "Private local-only runs when a real Ollama runtime exists." },
   { id: "ollama-llama3.1-8b", provider: "ollama", model: "llama3.1:8b", label: "Local Llama 3.1 8B", tier: "local", accessTier: "free", useCase: "Local fallback for private CPU/GPU nodes." },
   { id: "ollama-mistral-7b", provider: "ollama", model: "mistral:7b", label: "Local Mistral 7B", tier: "local", accessTier: "free", useCase: "Local low-cost instruction path." },
@@ -1333,7 +1336,7 @@ function resolveModelSelection(value: unknown): ModelCatalogItem | null {
     return null;
   }
 
-  return getModelCatalog().find((model) => model.id === value.trim() && model.available) || null;
+  return getModelCatalog().find((model) => model.id === value.trim() && model.available && model.selectableForPlanCompile !== false && (model.modality || "text") === "text") || null;
 }
 
 function getPrimaryProvider() {
