@@ -141,9 +141,23 @@ interface BootstrapPayload {
   primaryProvider: string;
   primaryProviderLabel: string;
   providerChain: string[];
+  modelCatalog?: ModelCatalogItem[];
+  availableModelCount?: number;
   researchFeedSource: string;
   authMode?: "disabled" | "cookie_session";
   persistenceMode?: "file" | "postgres";
+}
+
+interface ModelCatalogItem {
+  id: string;
+  provider: string;
+  providerLabel: string;
+  model: string;
+  label: string;
+  tier: "fast" | "balanced" | "premium" | "research" | "local";
+  useCase: string;
+  configured: boolean;
+  available: boolean;
 }
 
 interface ReplayRecord {
@@ -180,6 +194,8 @@ export default function App() {
   const [identity, setIdentity] = useState<string>("LOCAL_OPERATOR");
   const [providerLabel, setProviderLabel] = useState<string>("Deterministic fallback");
   const [providerChain, setProviderChain] = useState<string[]>([]);
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogItem[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [researchFeedSource, setResearchFeedSource] = useState<string>("arXiv");
   const [signalHistory, setSignalHistory] = useState<Record<string, Array<{ val: number }>>>({});
   const [authRequired, setAuthRequired] = useState(false);
@@ -192,6 +208,8 @@ export default function App() {
   const executionViewportRef = useRef<HTMLDivElement | null>(null);
   const activePlan = plans[0];
   const latestArtifactRun = runs.find((run) => run.artifact) ?? null;
+  const availableModels = modelCatalog.filter((model) => model.available);
+  const selectedModel = modelCatalog.find((model) => model.id === selectedModelId) || availableModels[0] || null;
   const blackBoxMode = typeof window !== "undefined" && (
     new URLSearchParams(window.location.search).get("mode") === "blackbox" ||
     new URLSearchParams(window.location.search).get("demo") === "1"
@@ -264,6 +282,9 @@ export default function App() {
         setIdentity(bootstrap.userEmail || "LOCAL_OPERATOR");
         setProviderLabel(bootstrap.primaryProviderLabel || "Deterministic fallback");
         setProviderChain(Array.isArray(bootstrap.providerChain) ? bootstrap.providerChain : []);
+        const catalog = Array.isArray(bootstrap.modelCatalog) ? bootstrap.modelCatalog : [];
+        setModelCatalog(catalog);
+        setSelectedModelId(catalog.find((model) => model.available)?.id || "");
         setResearchFeedSource(bootstrap.researchFeedSource || "arXiv");
         setAuthChecked(true);
         interval = setInterval(() => {
@@ -352,7 +373,7 @@ export default function App() {
       const res = await fetch("/api/plans/compile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ intent: trimmedIntent }),
+        body: JSON.stringify({ intent: trimmedIntent, modelId: selectedModelId || undefined }),
       });
 
       const payload = await res.json();
@@ -685,6 +706,54 @@ export default function App() {
                     <h1 className="font-serif italic text-5xl text-white/90 leading-tight">
                       "Probability is merely the shadow of a hidden order."
                     </h1>
+                  </div>
+
+                  <div className="w-full glass-panel border border-white/10 rounded-xl p-4 text-left">
+                    <div className="flex items-center justify-between gap-4 mb-3">
+                      <div>
+                        <div className="text-[9px] uppercase tracking-[0.35em] text-blue-300/70 font-mono">Model Router</div>
+                        <div className="mt-1 text-xs text-white/50">
+                          {availableModels.length} live model routes available
+                          {modelCatalog.length > availableModels.length ? ` / ${modelCatalog.length} cataloged` : ""}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[9px] uppercase tracking-[0.2em] text-white/30 font-mono">Selected</div>
+                        <div className="mt-1 text-xs text-white/80">{selectedModel?.label || providerLabel}</div>
+                      </div>
+                    </div>
+                    <select
+                      value={selectedModelId}
+                      onChange={(event) => setSelectedModelId(event.target.value)}
+                      className="w-full bg-black/80 border border-white/10 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-400/70"
+                    >
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.providerLabel} - {model.label} [{model.tier}]
+                        </option>
+                      ))}
+                    </select>
+                    <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {modelCatalog.slice(0, 16).map((model) => (
+                        <button
+                          key={model.id}
+                          type="button"
+                          disabled={!model.available}
+                          onClick={() => model.available && setSelectedModelId(model.id)}
+                          className={`rounded-lg border px-3 py-2 text-left transition-all ${
+                            selectedModelId === model.id
+                              ? "border-blue-400 bg-blue-500/15 text-white"
+                              : model.available
+                                ? "border-white/10 bg-white/[0.03] text-white/70 hover:border-white/25"
+                                : "border-white/5 bg-white/[0.01] text-white/20"
+                          }`}
+                          title={model.useCase}
+                        >
+                          <div className="text-[8px] uppercase tracking-[0.2em] font-mono">{model.providerLabel}</div>
+                          <div className="mt-1 truncate text-[10px]">{model.label}</div>
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   <div className="w-full relative group">

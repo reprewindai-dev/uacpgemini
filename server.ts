@@ -1,6 +1,6 @@
 import "dotenv/config";
 import crypto from "crypto";
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, spawnSync, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import express from "express";
 import { createServer as createViteServer } from "vite";
@@ -260,12 +260,25 @@ interface SessionStatusResponse {
 
 type ModelProvider = "groq" | "huggingface" | "ollama" | "gemini" | "fallback";
 type ModelOperation = "plan_compile" | "artifact_compile";
+type SelectableModelProvider = Exclude<ModelProvider, "fallback">;
 
 interface LatencyMeasurement {
   durationMs: number;
   provider: ModelProvider;
   operation: ModelOperation;
   recordedAt: string;
+}
+
+interface ModelCatalogItem {
+  id: string;
+  provider: SelectableModelProvider;
+  providerLabel: string;
+  model: string;
+  label: string;
+  tier: "fast" | "balanced" | "premium" | "research" | "local";
+  useCase: string;
+  configured: boolean;
+  available: boolean;
 }
 
 interface ObservabilityTelemetry {
@@ -300,6 +313,7 @@ let publicDemoUsage: AppState["publicDemoUsage"] = {};
 let ollamaProcess: ChildProcess | null = null;
 let ollamaBootstrapPromise: Promise<void> | null = null;
 let ollamaReady = false;
+let ollamaBinaryAvailable: boolean | null = null;
 const DEFAULT_RENDER_DATA_DIR = "/var/data";
 const DATA_FILE_PATH = process.env.DATA_FILE_PATH?.trim()
   || (existsSync(DEFAULT_RENDER_DATA_DIR) ? path.join(DEFAULT_RENDER_DATA_DIR, "uacp-state.json") : path.join(process.cwd(), "data", "uacp-state.json"));
@@ -746,14 +760,24 @@ function getOllamaConfig() {
     return null;
   }
 
+  const explicitBaseUrl = process.env.OLLAMA_BASE_URL?.trim();
+  if (!explicitBaseUrl && isHostedRuntime() && !getOllamaAutostartEnabled()) {
+    return null;
+  }
+
   return {
-    baseUrl: process.env.OLLAMA_BASE_URL?.trim() || "http://127.0.0.1:11434",
+    baseUrl: explicitBaseUrl || "http://127.0.0.1:11434",
     model,
   };
 }
 
 function getOllamaAutostartEnabled() {
-  return process.env.OLLAMA_AUTOSTART?.trim().toLowerCase() === "true";
+  const raw = process.env.OLLAMA_AUTOSTART?.trim().toLowerCase();
+  if (raw) {
+    return ["1", "true", "yes", "on"].includes(raw);
+  }
+
+  return false;
 }
 
 function getOllamaPullOnBootEnabled() {
@@ -776,6 +800,25 @@ function isLocalOllamaBaseUrl(baseUrl: string) {
   } catch {
     return false;
   }
+}
+
+function isHostedRuntime() {
+  return Boolean(process.env.RENDER || process.env.K_SERVICE || process.env.VERCEL || process.env.NETLIFY);
+}
+
+function hasOllamaBinary() {
+  if (ollamaBinaryAvailable !== null) {
+    return ollamaBinaryAvailable;
+  }
+
+  const result = spawnSync("ollama", ["--version"], {
+    env: process.env,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+
+  ollamaBinaryAvailable = !result.error && result.status === 0;
+  return ollamaBinaryAvailable;
 }
 
 function delay(ms: number) {
@@ -912,6 +955,10 @@ async function ensureOllamaReady() {
       throw new Error(`OLLAMA_AUTOSTART only supports local OLLAMA_BASE_URL values. Received ${baseUrl}.`);
     }
 
+    if (!hasOllamaBinary()) {
+      throw new Error("OLLAMA_AUTOSTART=true was requested, but the ollama executable is not installed in this runtime.");
+    }
+
     if (!ollamaProcess || ollamaProcess.exitCode !== null || ollamaProcess.killed) {
       console.log(`Starting Ollama at ${baseUrl}...`);
       ollamaProcess = spawn("ollama", ["serve"], {
@@ -991,7 +1038,7 @@ function normalizeProviderName(value: string | undefined | null): ModelProvider 
   }
 }
 
-function getProviderOrder(): ModelProvider[] {
+function getProviderOrder(modelOverride?: ModelCatalogItem | null): ModelProvider[] {
   const envPreferred = [
     normalizeProviderName(process.env.AI_PROVIDER),
     normalizeProviderName(process.env.LLM_PROVIDER),
@@ -999,11 +1046,12 @@ function getProviderOrder(): ModelProvider[] {
   ].filter((provider): provider is ModelProvider => provider !== null && provider !== "fallback");
 
   return [...new Set<ModelProvider>([
+    ...(modelOverride ? [modelOverride.provider] : []),
     ...envPreferred,
     "groq",
     "huggingface",
-    "ollama",
     "gemini",
+    "ollama",
   ])];
 }
 
@@ -1024,6 +1072,59 @@ function formatProviderLabel(provider: ModelProvider) {
     default:
       return "Deterministic fallback";
   }
+}
+
+const MODEL_CATALOG_BASE: Array<Omit<ModelCatalogItem, "providerLabel" | "configured" | "available">> = [
+  { id: "groq-llama-3.1-8b-instant", provider: "groq", model: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant", tier: "fast", useCase: "Low-latency plans, short governance drafts, fast playground work." },
+  { id: "groq-llama-3.3-70b-versatile", provider: "groq", model: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile", tier: "premium", useCase: "Higher quality open-model reasoning and plan synthesis." },
+  { id: "groq-gemma2-9b-it", provider: "groq", model: "gemma2-9b-it", label: "Gemma 2 9B IT", tier: "fast", useCase: "Fast instruction following and compact summaries." },
+  { id: "groq-deepseek-r1-distill-llama-70b", provider: "groq", model: "deepseek-r1-distill-llama-70b", label: "DeepSeek R1 Distill 70B", tier: "research", useCase: "Structured reasoning, counter-arguments, and research critique." },
+  { id: "groq-qwen-qwq-32b", provider: "groq", model: "qwen-qwq-32b", label: "Qwen QwQ 32B", tier: "research", useCase: "Math-heavy and technical planning tasks." },
+  { id: "gemini-3-flash-preview", provider: "gemini", model: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", tier: "balanced", useCase: "Default Gemini route for fast multimodal-ready synthesis." },
+  { id: "gemini-2.5-flash", provider: "gemini", model: "gemini-2.5-flash", label: "Gemini 2.5 Flash", tier: "fast", useCase: "Fast drafting, policy expansion, and artifact compilation." },
+  { id: "gemini-2.5-pro", provider: "gemini", model: "gemini-2.5-pro", label: "Gemini 2.5 Pro", tier: "premium", useCase: "Premium reasoning and careful governance documents." },
+  { id: "hf-llama-3.1-8b-fastest", provider: "huggingface", model: "meta-llama/Llama-3.1-8B-Instruct:fastest", label: "HF Llama 3.1 8B Fastest", tier: "fast", useCase: "Router-backed open-model fallback." },
+  { id: "hf-mistral-7b", provider: "huggingface", model: "mistralai/Mistral-7B-Instruct-v0.3:fastest", label: "HF Mistral 7B", tier: "balanced", useCase: "Instruction tasks and concise operations copy." },
+  { id: "hf-qwen2.5-7b", provider: "huggingface", model: "Qwen/Qwen2.5-7B-Instruct:fastest", label: "HF Qwen 2.5 7B", tier: "balanced", useCase: "Technical planning and schema-oriented responses." },
+  { id: "hf-qwen2.5-coder-7b", provider: "huggingface", model: "Qwen/Qwen2.5-Coder-7B-Instruct:fastest", label: "HF Qwen Coder 7B", tier: "research", useCase: "Code-aware plans and implementation reasoning." },
+  { id: "ollama-qwen2.5-7b", provider: "ollama", model: "qwen2.5:7b", label: "Local Qwen 2.5 7B", tier: "local", useCase: "Private local-only runs when a real Ollama runtime exists." },
+  { id: "ollama-llama3.1-8b", provider: "ollama", model: "llama3.1:8b", label: "Local Llama 3.1 8B", tier: "local", useCase: "Local fallback for private CPU/GPU nodes." },
+  { id: "ollama-mistral-7b", provider: "ollama", model: "mistral:7b", label: "Local Mistral 7B", tier: "local", useCase: "Local low-cost instruction path." },
+];
+
+function isProviderCredentialed(provider: SelectableModelProvider) {
+  switch (provider) {
+    case "groq":
+      return getGroqConfig() !== null;
+    case "huggingface":
+      return getHuggingFaceConfig() !== null;
+    case "gemini":
+      return getGeminiConfig() !== null;
+    case "ollama":
+      return isProviderConfigured("ollama");
+    default:
+      return false;
+  }
+}
+
+function getModelCatalog(): ModelCatalogItem[] {
+  return MODEL_CATALOG_BASE.map((model) => {
+    const configured = isProviderCredentialed(model.provider);
+    return {
+      ...model,
+      providerLabel: formatProviderLabel(model.provider),
+      configured,
+      available: configured,
+    };
+  });
+}
+
+function resolveModelSelection(value: unknown): ModelCatalogItem | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  return getModelCatalog().find((model) => model.id === value.trim() && model.available) || null;
 }
 
 function getPrimaryProvider() {
@@ -1056,7 +1157,7 @@ function isProviderConfigured(provider: ModelProvider) {
     case "huggingface":
       return getHuggingFaceConfig() !== null;
     case "ollama":
-      return getOllamaConfig() !== null;
+      return getOllamaConfig() !== null && (!isLocalOllamaBaseUrl(getOllamaConfig()!.baseUrl) || getOllamaAutostartEnabled() || !isHostedRuntime());
     case "gemini":
       return getGeminiConfig() !== null;
     case "fallback":
@@ -1066,7 +1167,7 @@ function isProviderConfigured(provider: ModelProvider) {
   }
 }
 
-async function requestGroq(prompt: string, expectJson: boolean, operation: ModelOperation) {
+async function requestGroq(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
   const groq = getGroqConfig();
   if (!groq) {
     throw new Error("Groq is not configured");
@@ -1080,7 +1181,7 @@ async function requestGroq(prompt: string, expectJson: boolean, operation: Model
       Authorization: `Bearer ${groq.apiKey}`,
     },
     body: JSON.stringify({
-      model: groq.model,
+      model: modelOverride?.provider === "groq" ? modelOverride.model : groq.model,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.2,
       response_format: expectJson ? { type: "json_object" } : undefined,
@@ -1102,7 +1203,7 @@ async function requestGroq(prompt: string, expectJson: boolean, operation: Model
   return { provider: "groq" as const, text: cleanModelText(text) };
 }
 
-async function requestHuggingFace(prompt: string, expectJson: boolean, operation: ModelOperation) {
+async function requestHuggingFace(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
   const huggingFace = getHuggingFaceConfig();
   if (!huggingFace) {
     throw new Error("Hugging Face is not configured");
@@ -1116,7 +1217,7 @@ async function requestHuggingFace(prompt: string, expectJson: boolean, operation
       Authorization: `Bearer ${huggingFace.token}`,
     },
     body: JSON.stringify({
-      model: huggingFace.model,
+      model: modelOverride?.provider === "huggingface" ? modelOverride.model : huggingFace.model,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.2,
       response_format: expectJson ? { type: "json_object" } : undefined,
@@ -1138,7 +1239,7 @@ async function requestHuggingFace(prompt: string, expectJson: boolean, operation
   return { provider: "huggingface" as const, text: cleanModelText(text) };
 }
 
-async function requestOllama(prompt: string, expectJson: boolean, operation: ModelOperation) {
+async function requestOllama(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
   const ollama = getOllamaConfig();
   if (!ollama) {
     throw new Error("Ollama is not configured");
@@ -1151,7 +1252,7 @@ async function requestOllama(prompt: string, expectJson: boolean, operation: Mod
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: ollama.model,
+      model: modelOverride?.provider === "ollama" ? modelOverride.model : ollama.model,
       prompt,
       stream: false,
       format: expectJson ? "json" : undefined,
@@ -1173,7 +1274,7 @@ async function requestOllama(prompt: string, expectJson: boolean, operation: Mod
   return { provider: "ollama" as const, text: cleanModelText(text) };
 }
 
-async function requestGemini(prompt: string, expectJson: boolean, operation: ModelOperation) {
+async function requestGemini(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
   const gemini = getGeminiConfig();
   if (!gemini) {
     throw new Error("Gemini is not configured");
@@ -1182,7 +1283,7 @@ async function requestGemini(prompt: string, expectJson: boolean, operation: Mod
   const ai = new GoogleGenAI({ apiKey: gemini.apiKey });
   const startedAt = Date.now();
   const response = await withTimeout(() => ai.models.generateContent({
-    model: gemini.model,
+    model: modelOverride?.provider === "gemini" ? modelOverride.model : gemini.model,
     contents: prompt,
     config: expectJson ? { responseMimeType: "application/json" } : undefined,
   }), "Gemini request");
@@ -1197,10 +1298,10 @@ async function requestGemini(prompt: string, expectJson: boolean, operation: Mod
   return { provider: "gemini" as const, text: cleanModelText(text) };
 }
 
-async function generateModelText(prompt: string, expectJson: boolean, operation: ModelOperation) {
+async function generateModelText(prompt: string, expectJson: boolean, operation: ModelOperation, modelOverride?: ModelCatalogItem | null) {
   const failures: string[] = [];
 
-  for (const provider of getProviderOrder()) {
+  for (const provider of getProviderOrder(modelOverride)) {
     if (!isProviderConfigured(provider)) {
       continue;
     }
@@ -1208,13 +1309,13 @@ async function generateModelText(prompt: string, expectJson: boolean, operation:
     try {
       switch (provider) {
         case "groq":
-          return await requestGroq(prompt, expectJson, operation);
+          return await requestGroq(prompt, expectJson, operation, modelOverride);
         case "huggingface":
-          return await requestHuggingFace(prompt, expectJson, operation);
+          return await requestHuggingFace(prompt, expectJson, operation, modelOverride);
         case "ollama":
-          return await requestOllama(prompt, expectJson, operation);
+          return await requestOllama(prompt, expectJson, operation, modelOverride);
         case "gemini":
-          return await requestGemini(prompt, expectJson, operation);
+          return await requestGemini(prompt, expectJson, operation, modelOverride);
         default:
           break;
       }
@@ -1893,7 +1994,7 @@ function normalizeCompiledPlan(planData: any, intent: string) {
   };
 }
 
-async function compilePlanDraft(intent: string): Promise<{
+async function compilePlanDraft(intent: string, modelOverride?: ModelCatalogItem | null): Promise<{
   plan: ReturnType<typeof normalizeCompiledPlan>;
   provider: ModelProvider;
   research: ResearchDossier;
@@ -1902,7 +2003,7 @@ async function compilePlanDraft(intent: string): Promise<{
   const research = await buildResearchDossier(intent);
 
   try {
-    const result = await generateModelText(buildCompilePlanPrompt(intent, research), true, "plan_compile");
+    const result = await generateModelText(buildCompilePlanPrompt(intent, research), true, "plan_compile", modelOverride);
     return {
       plan: normalizeCompiledPlan(parseJsonText(result.text), intent),
       provider: result.provider,
@@ -2350,6 +2451,7 @@ async function startServer() {
 
   app.get("/api/bootstrap", (req, res) => {
     const configuredProviders = getConfiguredProviders();
+    const modelCatalog = getModelCatalog();
     res.json({
       system: "Quantum UACP",
       version: "0.2.0",
@@ -2362,8 +2464,19 @@ async function startServer() {
       researchFeedSource: "arXiv",
       authMode: getAuthMode(),
       persistenceMode,
+      modelCatalog,
+      availableModelCount: modelCatalog.filter((model) => model.available).length,
       publicDemoLimit: PUBLIC_DEMO_ACTION_LIMIT,
       publicDemoLimitMode: "client_ip_fingerprint",
+    });
+  });
+
+  app.get("/api/models", (req, res) => {
+    const modelCatalog = getModelCatalog();
+    res.json({
+      models: modelCatalog,
+      availableModelCount: modelCatalog.filter((model) => model.available).length,
+      providerChain: getConfiguredProviders().map(formatProviderLabel),
     });
   });
 
@@ -2423,7 +2536,13 @@ async function startServer() {
     }
 
     try {
-      const compiledPlan = await compilePlanDraft(intent);
+      const selectedModel = resolveModelSelection(req.body?.modelId);
+      const requestedModelId = typeof req.body?.modelId === "string" ? req.body.modelId.trim() : "";
+      if (requestedModelId && !selectedModel) {
+        return res.status(400).json({ error: "Selected model is not available in this runtime" });
+      }
+
+      const compiledPlan = await compilePlanDraft(intent, selectedModel);
       const newPlan = createPlanRecord(
         compiledPlan.plan.name,
         intent,
@@ -2436,6 +2555,8 @@ async function startServer() {
       addEvent("PLAN_CREATED", `New plan created: ${newPlan.id} (${newPlan.name})`, {
         planId: newPlan.id,
         source: compiledPlan.provider,
+        selectedModelId: selectedModel?.id || null,
+        selectedModel: selectedModel?.model || null,
         researchProvider: compiledPlan.research.provider,
         researchMode: compiledPlan.research.mode,
         researchTopics: compiledPlan.research.topics.length,
