@@ -775,6 +775,10 @@ function getOllamaConfig() {
 function getOllamaAutostartEnabled() {
   const raw = process.env.OLLAMA_AUTOSTART?.trim().toLowerCase();
   if (raw) {
+    if (isHostedRuntime() && process.env.OLLAMA_ALLOW_HOSTED_AUTOSTART?.trim().toLowerCase() !== "true") {
+      return false;
+    }
+
     return ["1", "true", "yes", "on"].includes(raw);
   }
 
