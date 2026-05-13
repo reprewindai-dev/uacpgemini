@@ -761,12 +761,13 @@ function getOllamaConfig() {
   }
 
   const explicitBaseUrl = process.env.OLLAMA_BASE_URL?.trim();
-  if (!explicitBaseUrl && isHostedRuntime() && !getOllamaAutostartEnabled()) {
+  const baseUrl = explicitBaseUrl || "http://127.0.0.1:11434";
+  if (isLocalOllamaBaseUrl(baseUrl) && !getOllamaAutostartEnabled() && !getLocalOllamaEnabled()) {
     return null;
   }
 
   return {
-    baseUrl: explicitBaseUrl || "http://127.0.0.1:11434",
+    baseUrl,
     model,
   };
 }
@@ -782,6 +783,11 @@ function getOllamaAutostartEnabled() {
 
 function getOllamaPullOnBootEnabled() {
   return process.env.OLLAMA_PULL_ON_BOOT?.trim().toLowerCase() === "true";
+}
+
+function getLocalOllamaEnabled() {
+  const raw = process.env.OLLAMA_ENABLE_LOCAL?.trim().toLowerCase();
+  return raw ? ["1", "true", "yes", "on"].includes(raw) : false;
 }
 
 function getOllamaStartupTimeoutMs() {
@@ -803,7 +809,16 @@ function isLocalOllamaBaseUrl(baseUrl: string) {
 }
 
 function isHostedRuntime() {
-  return Boolean(process.env.RENDER || process.env.K_SERVICE || process.env.VERCEL || process.env.NETLIFY);
+  return Boolean(
+    process.env.RENDER ||
+    process.env.RENDER_EXTERNAL_URL ||
+    process.env.RENDER_SERVICE_ID ||
+    process.env.RENDER_SERVICE_NAME ||
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.K_SERVICE ||
+    process.env.VERCEL ||
+    process.env.NETLIFY
+  );
 }
 
 function hasOllamaBinary() {
@@ -1157,7 +1172,7 @@ function isProviderConfigured(provider: ModelProvider) {
     case "huggingface":
       return getHuggingFaceConfig() !== null;
     case "ollama":
-      return getOllamaConfig() !== null && (!isLocalOllamaBaseUrl(getOllamaConfig()!.baseUrl) || getOllamaAutostartEnabled() || !isHostedRuntime());
+      return getOllamaConfig() !== null;
     case "gemini":
       return getGeminiConfig() !== null;
     case "fallback":
