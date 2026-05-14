@@ -20,28 +20,6 @@
 
   body {
     @apply bg-[var(--color-uacp-bg)] text-[var(--color-uacp-text)] font-sans antialiased;
-    overflow: hidden;
-  }
-
-  * {
-    min-width: 0;
-  }
-}
-
-.uacp-workspace {
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-}
-
-@media (max-width: 1180px) {
-  .uacp-workspace {
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 920px) {
-  .uacp-workspace {
-    grid-template-columns: 1fr;
-    overflow-y: auto;
   }
 }
 
@@ -54,7 +32,6 @@
 
 .custom-scrollbar::-webkit-scrollbar {
   width: 8px;
-  height: 8px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-track {
