@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, ReactNode } from "react";
+import { VoiceInterface } from "./components/VoiceInterface";
 import { 
   Zap, 
   Terminal, 
@@ -16,15 +17,9 @@ import {
   Layers,
   Lock,
   Search,
-  BrainCircuit
+  BrainCircuit,
+  Mic
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
-import { GoogleGenAI } from "@google/genai";
-import { 
-  AreaChart, 
-  Area, 
-  ResponsiveContainer,
-} from "recharts";
 
 // --- Types ---
 interface SSRNSignal {
@@ -68,7 +63,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'intent' | 'execution' | 'ops'>('intent');
-  const [intent, setIntent] = useState("");
+  const [intent, setIntent] = useState(() => localStorage.getItem('intent_console') || "");
   const [loading, setLoading] = useState(false);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -76,7 +71,16 @@ export default function App() {
   const [signals, setSignals] = useState<any>(null);
   const [ssrnData, setSsrnData] = useState<SSRNSignal[]>([]);
   const [identity, setIdentity] = useState<string>("ANON_AGENT");
+  const [scale, setScale] = useState(() => parseFloat(localStorage.getItem('graph_scale') || '1'));
+  const [pan, setPan] = useState(() => JSON.parse(localStorage.getItem('graph_pan') || '{"x": 0, "y": 0}'));
+  const [isVoiceOpen, setIsVoiceOpen] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem('intent_console', intent);
+    localStorage.setItem('graph_scale', scale.toString());
+    localStorage.setItem('graph_pan', JSON.stringify(pan));
+  }, [intent, scale, pan]);
 
   useEffect(() => {
     // Initial Bootstrap
@@ -145,11 +149,17 @@ export default function App() {
 // --- Settings ---
   const [llmProvider, setLlmProvider] = useState<string>(localStorage.getItem('llm_provider') || 'gemini');
   const [llmModel, setLlmModel] = useState<string>(localStorage.getItem('llm_model') || 'gemini-3-flash-preview');
+  const [compliance, setCompliance] = useState<string[]>(JSON.parse(localStorage.getItem('compliance') || '[]'));
 
   useEffect(() => {
     localStorage.setItem('llm_provider', llmProvider);
     localStorage.setItem('llm_model', llmModel);
-  }, [llmProvider, llmModel]);
+    localStorage.setItem('compliance', JSON.stringify(compliance));
+  }, [llmProvider, llmModel, compliance]);
+
+  const toggleCompliance = (option: string) => {
+    setCompliance(prev => prev.includes(option) ? prev.filter(c => c !== option) : [...prev, option]);
+  };
 
   // --- Handlers ---
   const handleCreatePlan = async () => {
@@ -163,7 +173,8 @@ export default function App() {
         body: JSON.stringify({ 
             intent, 
             provider: llmProvider, 
-            model: llmModel 
+            model: llmModel,
+            compliance
         })
       });
       if (!res.ok) throw new Error("Failed to generate plan");
@@ -206,6 +217,8 @@ export default function App() {
     <div className="h-screen flex flex-col bg-[#050505] text-[#e0e0e0] font-sans selection:bg-blue-500/30 overflow-hidden relative">
       <div className="absolute inset-0 scanner pointer-events-none z-0 opacity-50" />
       
+      <VoiceInterface isOpen={isVoiceOpen} onClose={() => setIsVoiceOpen(false)} />
+      
       {/* Header Navigation */}
       <header className="h-16 border-b border-white/10 flex items-center justify-between px-8 bg-[#0a0a0a] z-50 shadow-2xl relative">
         <div className="flex items-center gap-6">
@@ -227,18 +240,65 @@ export default function App() {
           <TabButton active={activeTab === 'intent'} onClick={() => setActiveTab('intent')} label="Signal Feed" />
           <TabButton active={activeTab === 'execution'} onClick={() => setActiveTab('execution')} label="Probability Matrix" />
           <TabButton active={activeTab === 'ops'} onClick={() => setActiveTab('ops')} label="Deterministic Ops" />
+          <div className="flex gap-1 items-center">
+            {/* API Key Selection Button */}
+            <button 
+                onClick={async () => {
+                    const hasKey = await (window as any).aistudio?.hasSelectedApiKey?.();
+                    if (!hasKey) {
+                        await (window as any).aistudio?.openSelectKey?.();
+                    }
+                }}
+                className="text-[9px] font-mono uppercase bg-white/5 border border-white/10 px-2 py-1 hover:bg-white/10 transition-colors cursor-pointer"
+            >
+                Key
+            </button>
+            <button 
+                onClick={() => setIsVoiceOpen(true)}
+                className="text-[9px] font-mono uppercase bg-white/5 border border-white/10 px-2 py-1 hover:bg-white/10 transition-colors cursor-pointer"
+            >
+                Voice
+            </button>
+          </div>
           
           <div className="h-8 w-px bg-white/5 mx-2" />
           
-          <div className="flex items-center gap-3 px-4 py-1.5 border border-white/10 rounded-full bg-white/5 backdrop-blur-sm group cursor-help">
-            <ShieldCheck size={12} className="text-blue-400" />
-            <span className="text-[9px] font-mono lowercase tracking-normal text-white/60">Node: Provider Settings</span>
-            <ArrowUpRight size={10} className="text-white/20 group-hover:text-blue-400 transition-colors" />
+          <div className="flex flex-col gap-1 items-end">
+             <div className="flex items-center gap-2 group">
+              <ShieldCheck size={12} className="text-blue-400" />
+              <select 
+                value={llmProvider}
+                onChange={(e) => setLlmProvider(e.target.value)}
+                className="bg-transparent text-[9px] font-mono lowercase tracking-normal text-white/60 focus:outline-none cursor-pointer hover:text-white"
+              >
+                <option value="gemini">gemini</option>
+                <option value="openai">openai</option>
+                <option value="groq">groq</option>
+                <option value="ollama">ollama</option>
+              </select>
+              <input 
+                value={llmModel}
+                onChange={(e) => setLlmModel(e.target.value)}
+                className="bg-transparent text-[9px] font-mono lowercase tracking-normal text-white/60 focus:outline-none w-32 border-b border-white/10 hover:border-blue-400/50 focus:border-blue-400"
+              />
+            </div>
+            <div className="flex gap-1">
+                {['eu_ai_act', 'soc2', 'hipaa', 'gpa'].map(opt => (
+                    <button 
+                        key={opt}
+                        onClick={() => toggleCompliance(opt)}
+                        className={`text-[7px] font-mono uppercase px-1 py-0.5 border ${compliance.includes(opt) ? 'bg-blue-500/20 border-blue-500 text-blue-300' : 'border-white/10 text-white/40'}`}
+                    >
+                        {opt}
+                    </button>
+                ))}
+            </div>
           </div>
         </nav>
       </header>
 
       {/* Main Content Workspace */}
+
       <main className="flex-1 grid grid-cols-12 gap-1 p-1 bg-white/5 overflow-hidden">
         
         {/* Left Column: Research Signals & Event Log */}
@@ -429,9 +489,36 @@ export default function App() {
                   </motion.div>
                 )}
 
-                <div className="flex-1 flex items-center justify-center overflow-auto custom-scrollbar p-12">
+                <div 
+                  className="flex-1 flex items-center justify-center overflow-hidden custom-scrollbar p-12 cursor-grab active:cursor-grabbing"
+                  onWheel={(e) => {
+                    e.preventDefault();
+                    const delta = e.deltaY;
+                    setScale(s => Math.min(Math.max(s - delta * 0.001, 0.5), 2));
+                  }}
+                  onMouseDown={(e) => {
+                    const el = e.currentTarget;
+                    const startX = e.clientX - pan.x;
+                    const startY = e.clientY - pan.y;
+                    
+                    const handleMove = (moveEvent: MouseEvent) => {
+                      setPan({ x: moveEvent.clientX - startX, y: moveEvent.clientY - startY });
+                    };
+                    
+                    const handleUp = () => {
+                      window.removeEventListener('mousemove', handleMove);
+                      window.removeEventListener('mouseup', handleUp);
+                    };
+                    
+                    window.addEventListener('mousemove', handleMove);
+                    window.addEventListener('mouseup', handleUp);
+                  }}
+                >
                    {plans.length > 0 ? (
-                     <div className="flex items-center gap-12 relative animate-in fade-in duration-700">
+                     <div 
+                        style={{ transform: `scale(${scale}) translate(${pan.x}px, ${pan.y}px)` }}
+                        className="flex items-center gap-12 relative animate-in fade-in duration-700 transition-transform origin-center"
+                     >
                         {plans[0].graph?.nodes?.map((node: any, idx: number) => {
                           const activeRun = runs.find(r => r.planId === plans[0].id && r.status === 'executing');
                           const isActive = activeRun?.currentStep === node.description;

@@ -8,18 +8,18 @@
   --color-uacp-bg: #050505;
   --color-uacp-card: #0a0a0a;
   --color-uacp-hero: #080808;
-  --color-uacp-border: rgba(255, 255, 255, 0.08);
-  --color-uacp-accent: #60a5fa; /* blue-400 */
-  --color-uacp-accent-secondary: #c084fc; /* purple-400 */
-  --color-uacp-text: #e0e0e0;
-  --color-uacp-muted: rgba(255, 255, 255, 0.4);
+  --color-uacp-border: rgba(255, 255, 255, 0.06); /* Slightly more subtle */
+  --color-uacp-accent: #3b82f6; /* A slightly more serious blue */
+  --color-uacp-accent-secondary: #a855f7; /* A more refined purple */
+  --color-uacp-text: #e5e7eb; /* Slightly more readable text */
+  --color-uacp-muted: rgba(255, 255, 255, 0.35); /* More subtle muted */
 }
 
 @layer base {
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap');
 
   body {
-    @apply bg-[var(--color-uacp-bg)] text-[var(--color-uacp-text)] font-sans antialiased;
+    @apply bg-[var(--color-uacp-bg)] text-[var(--color-uacp-text)] font-sans antialiased selection:bg-blue-500/30;
   }
 }
 

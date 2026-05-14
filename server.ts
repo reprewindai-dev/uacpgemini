@@ -8,17 +8,19 @@ import { GoogleGenAI } from "@google/genai";
 import { OpenAI } from "openai";
 import { XMLParser } from "fast-xml-parser";
 
+const app = express();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 const MODEL_NAME = process.env.MODEL_NAME || "gemini-3-flash-preview";
 
-async function generateCompletion(prompt: string): Promise<string> {
-  const provider = process.env.LLM_PROVIDER || 'gemini';
+async function generateCompletion(prompt: string, options?: { provider?: string, model?: string }): Promise<string> {
+  const provider = options?.provider || process.env.LLM_PROVIDER || 'gemini';
+  const model = options?.model || process.env.MODEL_NAME || (provider === 'gemini' ? "gemini-3-flash-preview" : "gpt-3.5-turbo");
 
   switch (provider) {
     case 'gemini':
       const result = await ai.models.generateContent({
-        model: process.env.MODEL_NAME || "gemini-3-flash-preview",
+        model: model,
         contents: prompt
       });
       return result.text || "";
@@ -31,7 +33,7 @@ async function generateCompletion(prompt: string): Promise<string> {
         baseURL: process.env.OPENAI_BASE_URL
       });
       const response = await client.chat.completions.create({
-        model: process.env.MODEL_NAME || "gpt-3.5-turbo",
+        model: model,
         messages: [{ role: 'user', content: prompt }]
       });
       return response.choices[0].message.content || "";
@@ -133,12 +135,17 @@ updateRealSignals();
 setInterval(updateRealSignals, 300000);
 
 app.post("/api/intent-to-plan", async (req, res) => {
-  const { intent, provider, model } = req.body;
+  const { intent, provider, model, compliance } = req.body;
+  const compliancePrompt = compliance && compliance.length > 0 
+    ? `ENSURE COMPLIANCE WITH: ${compliance.join(", ")}.` 
+    : "";
+    
   const prompt = `
     You are the Quantum UACP Deterministic Orchestrator. 
     Translate natural language intent into a hybrid quantum-classical orchestration plan.
     
     Intent: "${intent}"
+    ${compliancePrompt}
     
     Return ONLY a JSON object:
     {
@@ -215,7 +222,6 @@ function broadcast(data: any) {
 }
 
 async function startServer() {
-  const app = express();
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ server: httpServer });
 
