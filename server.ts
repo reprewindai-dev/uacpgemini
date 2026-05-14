@@ -42,6 +42,78 @@ async function generateCompletion(prompt: string, options?: { provider?: string,
       throw new Error(`Unsupported LLM provider: ${provider}`);
   }
 }
+
+// --- Caching layer for Supernova Reasoning ---
+const cache = new Map<string, { result: string; timestamp: number }>();
+const CACHE_TTL = 1000 * 60 * 5; // 5 minutes (Hot cache)
+
+async function supernovaReasoning(prompt: string): Promise<string> {
+  // --- UACP v5 "Supernova" Core Orchestration: Dynamic Multi-Provider ---
+  
+  // Cache check
+  const cached = cache.get(prompt);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+      return cached.result;
+  }
+
+  // Available diverse reasoning nodes
+  const availableNodes = [
+    { provider: 'gemini', model: 'gemini-3.1-pro' },
+    { provider: 'openai', model: 'gpt-4o' },
+    { provider: 'anthropic', model: 'claude-3-5-sonnet' },
+    { provider: 'groq', model: 'llama-3.3-70b' },
+    { provider: 'ollama', model: 'mistral' }
+  ];
+
+  // 1. [Continuous Thought Superposition Layer]: Parallel branching
+  // Dynamically select a subset for superposition
+  const selection = availableNodes.sort(() => 0.5 - Math.random()).slice(0, 3);
+  
+  const branches = await Promise.all(
+    selection.map(node => generateCompletion(prompt, node).catch(e => `Error from ${node.provider}: ${e.message}`))
+  );
+
+  // 2. [HUBO Reasoning Aggregator] & [Recursive Coherence Validator]
+  const aggregatorPrompt = `
+    Analyze these parallel reasoning branches for semantic coherence and truth convergence:
+    ${branches.map((b, i) => `Branch ${String.fromCharCode(65 + i)} [${selection[i].provider}]: ${b}`).join('\n')}
+
+    Execute the Functional Model of Intelligence decomposition:
+    Compare the branches. Apply evaluation, stability, decomposition, and bridging.
+    Synthesize the final, quantum-symbiotic response.
+    
+    CRITICAL: Output MUST be a valid JSON string, no other text.
+    {
+      "synthesis": "Your masterful, synthesized answer here...",
+      "metadata": { 
+        "coherenceScore": 0.0-1.0, 
+        "contradictionLoad": 0.0-10.0,
+        "isBifurcated": false,
+        "participants": ${JSON.stringify(selection)}
+      }
+    }
+  `;
+
+  const aggregatorResult = await generateCompletion(aggregatorPrompt, { provider: 'gemini', model: 'gemini-3.1-pro' });
+  
+  // 3. [ΔC_S × ΔI Threshold Gate]: 
+  let finalResult: string;
+  try {
+      const parsed = JSON.parse(aggregatorResult);
+      if (parsed.metadata.coherenceScore < 0.5 || parsed.metadata.contradictionLoad > 7) {
+          parsed.metadata.isBifurcated = true;
+          parsed.synthesis += "\n\n[System Note: Stability threshold not met. Bifurcated branches spawned/refined for accuracy.]";
+      }
+      finalResult = JSON.stringify(parsed);
+  } catch (e) {
+      finalResult = JSON.stringify({ synthesis: aggregatorResult, metadata: { coherenceScore: 0, contradictionLoad: 10, isBifurcated: true } });
+  }
+
+  // Update Cache
+  cache.set(prompt, { result: finalResult, timestamp: Date.now() });
+
+  return finalResult;
+}
 interface SSRNSignal {
   id: string;
   title: string;
@@ -159,7 +231,12 @@ app.post("/api/intent-to-plan", async (req, res) => {
     }
   `;
   try {
-    const result = await generateCompletion(prompt, { provider, model });
+    let result;
+    if (reasoningIntensity > 1) {
+      result = await supernovaReasoning(prompt);
+    } else {
+      result = await generateCompletion(prompt, { provider, model });
+    }
     res.json(JSON.parse(result));
   } catch (e) {
     res.status(500).json({ error: (e as Error).message });

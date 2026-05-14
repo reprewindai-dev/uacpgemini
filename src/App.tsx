@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, ReactNode } from "react";
+import { motion, AnimatePresence } from "motion/react";
+// --- Voice-to-LLM Integration ---
 import { VoiceInterface } from "./components/VoiceInterface";
 import { 
   Zap, 
@@ -20,6 +22,7 @@ import {
   BrainCircuit,
   Mic
 } from "lucide-react";
+import { ResponsiveContainer, AreaChart, Area } from "recharts";
 
 // --- Types ---
 interface SSRNSignal {
@@ -58,8 +61,6 @@ interface Run {
   output?: string;
 }
 
-// --- SDK Initialization ---
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'intent' | 'execution' | 'ops'>('intent');
@@ -150,12 +151,16 @@ export default function App() {
   const [llmProvider, setLlmProvider] = useState<string>(localStorage.getItem('llm_provider') || 'gemini');
   const [llmModel, setLlmModel] = useState<string>(localStorage.getItem('llm_model') || 'gemini-3-flash-preview');
   const [compliance, setCompliance] = useState<string[]>(JSON.parse(localStorage.getItem('compliance') || '[]'));
+  const [reasoningIntensity, setReasoningIntensity] = useState<number>(() => parseInt(localStorage.getItem('reasoning_intensity') || '1'));
+  const [useGoogleGrounding, setUseGoogleGrounding] = useState<boolean>(() => localStorage.getItem('use_google_grounding') === 'true');
 
   useEffect(() => {
     localStorage.setItem('llm_provider', llmProvider);
     localStorage.setItem('llm_model', llmModel);
     localStorage.setItem('compliance', JSON.stringify(compliance));
-  }, [llmProvider, llmModel, compliance]);
+    localStorage.setItem('reasoning_intensity', reasoningIntensity.toString());
+    localStorage.setItem('use_google_grounding', useGoogleGrounding.toString());
+  }, [llmProvider, llmModel, compliance, reasoningIntensity, useGoogleGrounding]);
 
   const toggleCompliance = (option: string) => {
     setCompliance(prev => prev.includes(option) ? prev.filter(c => c !== option) : [...prev, option]);
@@ -174,7 +179,9 @@ export default function App() {
             intent, 
             provider: llmProvider, 
             model: llmModel,
-            compliance
+            compliance,
+            reasoningIntensity,
+            useGoogleGrounding
         })
       });
       if (!res.ok) throw new Error("Failed to generate plan");
@@ -282,7 +289,24 @@ export default function App() {
                 className="bg-transparent text-[9px] font-mono lowercase tracking-normal text-white/60 focus:outline-none w-32 border-b border-white/10 hover:border-blue-400/50 focus:border-blue-400"
               />
             </div>
-            <div className="flex gap-1">
+            <div className="flex gap-2 items-center mt-1">
+                <select 
+                    value={reasoningIntensity}
+                    onChange={(e) => setReasoningIntensity(parseInt(e.target.value))}
+                    className="bg-black text-[8px] font-mono lowercase text-white/50 border border-white/10 px-1"
+                >
+                    <option value="1">Base Logic</option>
+                    <option value="2">Quantum Deep Think</option>
+                    <option value="3">Symbiosis CoT</option>
+                </select>
+                <button 
+                  onClick={() => setUseGoogleGrounding(!useGoogleGrounding)}
+                  className={`text-[8px] font-mono uppercase px-1 py-0.5 border ${useGoogleGrounding ? 'border-blue-500 text-blue-300' : 'border-white/10 text-white/40'}`}
+                >
+                    {useGoogleGrounding ? 'Google ON' : 'Google OFF'}
+                </button>
+            </div>
+            <div className="flex gap-1 mt-1">
                 {['eu_ai_act', 'soc2', 'hipaa', 'gpa'].map(opt => (
                     <button 
                         key={opt}
