@@ -20,7 +20,8 @@ import {
   Lock,
   Search,
   BrainCircuit,
-  Mic
+  Mic,
+  Download
 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area } from "recharts";
 
@@ -61,6 +62,38 @@ interface Run {
   output?: string;
 }
 
+// --- Export Schema Helper ---
+function exportSchema(plans: Plan[], runs: Run[]) {
+  const schema = {
+    exported_at: new Date().toISOString(),
+    version: "1.0.0",
+    system: "UACP GPC v1",
+    plans: plans.map(p => ({
+      id: p.id,
+      name: p.name,
+      intent: p.intent,
+      status: p.status,
+      createdAt: p.createdAt,
+      graph: p.graph,
+    })),
+    runs: runs.map(r => ({
+      id: r.id,
+      planId: r.planId,
+      status: r.status,
+      progress: r.progress,
+      currentStep: r.currentStep,
+      startTime: r.startTime,
+      output: r.output || null,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(schema, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `uacp-schema-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'intent' | 'execution' | 'ops'>('intent');
@@ -149,7 +182,7 @@ export default function App() {
 
 // --- Settings ---
   const [llmProvider, setLlmProvider] = useState<string>(localStorage.getItem('llm_provider') || 'gemini');
-  const [llmModel, setLlmModel] = useState<string>(localStorage.getItem('llm_model') || 'gemini-3-flash-preview');
+  const [llmModel, setLlmModel] = useState<string>(localStorage.getItem('llm_model') || 'gemini-2.0-flash');
   const [compliance, setCompliance] = useState<string[]>(JSON.parse(localStorage.getItem('compliance') || '[]'));
   const [reasoningIntensity, setReasoningIntensity] = useState<number>(() => parseInt(localStorage.getItem('reasoning_intensity') || '1'));
   const [useGoogleGrounding, setUseGoogleGrounding] = useState<boolean>(() => localStorage.getItem('use_google_grounding') === 'true');
@@ -205,21 +238,6 @@ export default function App() {
     }
   };
 
-  const handleStartRun = async (planId: string) => {
-    try {
-      const res = await fetch("/api/runs", {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planId })
-      });
-      const newRun = await res.json();
-      setRuns(prev => [newRun, ...prev]);
-      setActiveTab('ops');
-    } catch (error) {
-      console.error("Run error:", error);
-    }
-  };
-
   return (
     <div className="h-screen flex flex-col bg-[#050505] text-[#e0e0e0] font-sans selection:bg-blue-500/30 overflow-hidden relative">
       <div className="absolute inset-0 scanner pointer-events-none z-0 opacity-50" />
@@ -239,7 +257,7 @@ export default function App() {
           </div>
           <div className="flex flex-col">
             <span className="font-serif italic text-xl tracking-tight leading-none text-white/90">The Deterministic Engine</span>
-            <span className="text-[8px] font-mono tracking-[0.4em] uppercase text-blue-400/60 mt-1">UACP Control Plane v0.2.0</span>
+            <span className="text-[8px] font-mono tracking-[0.4em] uppercase text-blue-400/60 mt-1">UACP GPC v1.0.0</span>
           </div>
         </div>
         
@@ -248,7 +266,6 @@ export default function App() {
           <TabButton active={activeTab === 'execution'} onClick={() => setActiveTab('execution')} label="Probability Matrix" />
           <TabButton active={activeTab === 'ops'} onClick={() => setActiveTab('ops')} label="Deterministic Ops" />
           <div className="flex gap-1 items-center">
-            {/* API Key Selection Button */}
             <button 
                 onClick={async () => {
                     const hasKey = await (window as any).aistudio?.hasSelectedApiKey?.();
@@ -282,6 +299,7 @@ export default function App() {
                 <option value="openai">openai</option>
                 <option value="groq">groq</option>
                 <option value="ollama">ollama</option>
+                <option value="openrouter">openrouter</option>
               </select>
               <input 
                 value={llmModel}
@@ -349,7 +367,7 @@ export default function App() {
                       <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
                       <span className="text-[8px] font-mono text-white/30 tracking-widest uppercase">Match Strength</span>
                     </div>
-                    <span className="text-[10px] font-mono text-green-500/80">{sig.strength}%</span>
+                    <span className="text-[10px] font-mono text-green-500/80">{sig.strength.toFixed(1)}%</span>
                   </div>
                 </div>
               ))}
@@ -434,7 +452,7 @@ export default function App() {
                             </div>
                             <div className="space-y-2 text-center">
                               <span className="text-[11px] font-mono tracking-[0.3em] text-blue-400 block uppercase">Analyzing Complexity</span>
-                              <span className="text-[9px] font-mono text-white/30 uppercase">Negotiating with Gemini Core Matrix...</span>
+                              <span className="text-[9px] font-mono text-white/30 uppercase">Routing through GPC...</span>
                             </div>
                           </div>
                         </div>
@@ -486,8 +504,13 @@ export default function App() {
                          <span className="text-[9px] font-mono text-blue-200 uppercase tracking-widest">Directive: {plans[0].name}</span>
                        </div>
                      )}
-                     <button className="text-[10px] font-mono text-white/50 hover:text-blue-400 transition-colors px-4 py-2 border border-white/10 rounded uppercase tracking-widest">
-                      Export Schema
+                     <button
+                       onClick={() => exportSchema(plans, runs)}
+                       disabled={plans.length === 0}
+                       className="text-[10px] font-mono text-white/50 hover:text-blue-400 transition-colors px-4 py-2 border border-white/10 rounded uppercase tracking-widest flex items-center gap-2 disabled:opacity-20 disabled:cursor-not-allowed"
+                     >
+                       <Download size={12} />
+                       Export Schema
                      </button>
                    </div>
                 </div>
@@ -556,14 +579,10 @@ export default function App() {
                               whileHover={{ scale: 1.05 }}
                               className={`w-64 p-8 glass-panel rounded-lg shadow-2xl relative z-10 transition-all border group-hover:shadow-blue-500/20 backdrop-blur-xl group cursor-crosshair ${isActive ? 'border-blue-500/80 shadow-[0_0_30px_rgba(59,130,246,0.3)]' : 'border-white/10 hover:border-blue-500/50'}`}
                             >
-                               {/* Active Indicator Pulse */}
                                {isActive && (
                                    <div className="absolute -top-2 -right-2 w-4 h-4 bg-blue-500 rounded-full animate-ping z-20" />
                                )}
-
-                               {/* Quantum Shimmer Effect */}
                                <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 via-transparent to-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
-                               
                                <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent ${isActive ? 'via-blue-400' : 'via-white/5'} to-transparent`} />
                                <div className="flex justify-between items-start mb-6">
                                   <div className={`p-2.5 rounded-lg border transition-colors ${isActive ? 'bg-blue-500/30 border-blue-400/50' : 'bg-white/5 border-white/10 group-hover:bg-blue-500/20'}`}>
@@ -577,7 +596,6 @@ export default function App() {
                                     </span>
                                   </div>
                                </div>
-                               
                                <div className={`text-sm font-mono font-black uppercase tracking-tight mb-3 flex items-center gap-2 ${isActive ? 'text-white' : 'text-white/95'}`}>
                                  {node.id}
                                  <motion.div 
@@ -586,11 +604,9 @@ export default function App() {
                                    className={`w-1 h-1 rounded-full ${isActive ? 'bg-blue-300' : 'bg-blue-400'}`} 
                                  />
                                </div>
-                               
                                <div className={`text-xs leading-relaxed font-light italic h-16 overflow-hidden mb-6 transition-colors ${isActive ? 'text-white/80' : 'text-white/50 group-hover:text-white/80'}`}>
                                  {node.description}
                                 </div>
-                               
                                <div className="flex items-center justify-between pt-5 border-t border-white/5">
                                   <div className="flex items-center gap-2">
                                      <div className={`w-1.5 h-1.5 rounded-sm ${isActive ? 'bg-blue-300 animate-pulse' : 'bg-blue-500 group-hover:animate-spin'}`} />
@@ -598,14 +614,10 @@ export default function App() {
                                   </div>
                                   <ArrowUpRight size={12} className={isActive ? 'text-blue-300' : 'text-white/10 group-hover:text-white'} />
                                </div>
-
-                               {/* Position Indicators */}
                                <div className={`absolute -bottom-2 -left-2 text-[7px] font-mono transition-opacity ${isActive ? 'text-blue-400 opacity-100' : 'text-white/10 opacity-0 group-hover:opacity-100'}`}>
                                  X: {idx.toFixed(2)} Y: 0.00
                                </div>
                             </motion.div>
-                            
-                            {/* Connector Lines with Flow Effect */}
                             {idx < plans[0].graph.nodes.length - 1 && (
                               <div className="absolute top-1/2 -right-12 w-12 h-px z-0">
                                 <div className="absolute inset-0 bg-white/10" />
@@ -618,7 +630,6 @@ export default function App() {
                             )}
                           </div>
                         )})}
-
                      </div>
                    ) : (
                      <div className="flex flex-col items-center gap-6 opacity-30">
@@ -652,7 +663,15 @@ export default function App() {
                     <h2 className="font-serif italic text-3xl text-white/90">Archives of Order</h2>
                     <p className="text-[10px] uppercase tracking-[0.3em] text-white/30 font-bold">Live Execution Telemetry</p>
                    </div>
-                   <div className="flex items-center gap-4 text-right">
+                   <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => exportSchema(plans, runs)}
+                      disabled={runs.length === 0}
+                      className="text-[10px] font-mono text-white/50 hover:text-blue-400 transition-colors px-4 py-2 border border-white/10 rounded uppercase tracking-widest flex items-center gap-2 disabled:opacity-20 disabled:cursor-not-allowed"
+                    >
+                      <Download size={12} />
+                      Export Schema
+                    </button>
                     <div className="flex flex-col">
                       <span className="text-[8px] font-mono text-white/30">Latency</span>
                       <span className="text-xs font-mono text-blue-400">{signals?.classical_latency?.toFixed(1) || '0'}ms</span>
@@ -669,7 +688,6 @@ export default function App() {
                    {runs.map((run) => (
                      <div key={run.id} className="glass-panel p-8 relative overflow-hidden group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-blue-500 opacity-20 group-hover:opacity-100 transition-opacity" />
-                        
                         <div className="flex justify-between items-start mb-8">
                           <div className="space-y-2">
                              <div className="flex items-center gap-4">
@@ -684,7 +702,6 @@ export default function App() {
                              <div className="text-4xl font-serif italic text-white/90 tabular-nums">{run.progress}%</div>
                           </div>
                         </div>
-
                          <div className="space-y-4">
                            <div className="flex justify-between text-[10px] font-mono uppercase tracking-[0.2em] text-white/40">
                               <span className="flex items-center gap-2">
@@ -704,8 +721,6 @@ export default function App() {
                                 className="absolute top-0 bottom-0 w-20 bg-white/20 skew-x-12"
                               />
                            </div>
-                           
-                           {/* Step Micro-Labels */}
                            <div className="flex justify-between mt-2 overflow-hidden">
                               {plans.find(p => p.id === run.planId)?.graph.nodes.map((node, nIdx) => (
                                 <div key={`${node.id}-${nIdx}`} className="flex flex-col items-center gap-1 opacity-20 hover:opacity-100 transition-opacity cursor-default">
@@ -715,7 +730,6 @@ export default function App() {
                               ))}
                            </div>
                         </div>
-
                         {run.status === 'completed' && run.output && (
                            <motion.div 
                              initial={{ opacity: 0, y: 10 }}
@@ -740,7 +754,6 @@ export default function App() {
                         )}
                      </div>
                    ))}
-                   
                    {runs.length === 0 && (
                      <div className="h-full flex flex-col items-center justify-center opacity-20 space-y-6">
                         <Lock size={48} />
@@ -773,24 +786,12 @@ export default function App() {
                   color={idx % 2 === 0 ? "blue" : "purple"} 
                 />
               ))}
-              
               {!signals?.market_convergence && (
                 <>
-                  <ConvergenceBar 
-                    label="Deterministic Alpha" 
-                    value={"+14.2%"} 
-                    progress={0.72} 
-                    color="blue" 
-                  />
-                  <ConvergenceBar 
-                    label="Market Heuristics" 
-                    value={"+8.7%"} 
-                    progress={0.58} 
-                    color="purple" 
-                  />
+                  <ConvergenceBar label="Deterministic Alpha" value={"+14.2%"} progress={0.72} color="blue" />
+                  <ConvergenceBar label="Market Heuristics" value={"+8.7%"} progress={0.58} color="purple" />
                 </>
               )}
-              
               <div className="pt-8 border-t border-white/5 space-y-6">
                 <h3 className="text-[9px] uppercase tracking-widest text-white/20 font-bold">Observability Signals</h3>
                 {signals?.horowitz_signals?.map((sig: any, sIdx: number) => (
@@ -802,7 +803,6 @@ export default function App() {
                       </div>
                       <span className={`text-[9px] font-mono uppercase font-bold ${sig.trend === 'rising' ? 'text-green-500' : 'text-blue-400'}`}>{sig.trend}</span>
                     </div>
-                    
                     <div className="h-16 w-full opacity-50 overflow-hidden grayscale hover:grayscale-0 transition-all duration-700">
                        <ResponsiveContainer width="100%" height="100%" minHeight={60} minWidth={100}>
                           <AreaChart data={Array.from({length: 20}, () => ({ val: Math.random() }))}>
@@ -819,22 +819,20 @@ export default function App() {
                   </div>
                 ))}
               </div>
-
               <div className="p-5 glass-panel rounded border-white/5 bg-white/[0.01] mt-8">
                  <h3 className="text-[9px] uppercase tracking-widest text-white/30 font-bold mb-4 flex items-center gap-2">
                    <Info size={10} className="text-blue-400" />
                    Agent Consensus
                  </h3>
                  <div className="text-xs text-white/60 italic leading-relaxed font-light">
-                  "My strategy is grounded in the great agent Gemini. The signals converge on a singular outcome."
+                  "Routing through the GPC. Signals converge on a singular deterministic outcome."
                  </div>
                  <div className="mt-4 flex items-center gap-2">
                     <div className="w-4 h-4 rounded-full bg-blue-500/10 flex items-center justify-center text-[8px] text-blue-400 italic">g</div>
-                    <span className="text-[8px] font-mono text-white/20 uppercase tracking-widest">— GEMINI CORE MATRIX</span>
+                    <span className="text-[8px] font-mono text-white/20 uppercase tracking-widest">— UACP GPC CORE</span>
                  </div>
               </div>
            </div>
-
            <div className="p-8 border-t border-white/5 bg-black/40">
               <div className="flex flex-col gap-4">
                 <div className="flex justify-between items-center text-[9px] font-mono text-white/20 uppercase tracking-widest">
@@ -871,9 +869,9 @@ export default function App() {
           </span>
         </div>
         <div className="flex gap-6 items-center">
-          <span>AI Studio Build 2026.05.06</span>
+          <span>UACP GPC Build 2026.05</span>
           <div className="h-3 w-px bg-white/10" />
-          <span>© DETERMINISTIC RESEARCH • UNIVERSAL CONTROL PROTOTYPE</span>
+          <span>© VEKLOM • UNIVERSAL AI CONTROL PLANE</span>
         </div>
       </footer>
     </div>
