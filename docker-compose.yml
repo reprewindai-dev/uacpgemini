@@ -1,0 +1,70 @@
+# Runtime + optional Ollama integration for Coolify
+# Keep this file in the repo root.
+# If your Llama already exists in another host/container, either:
+# 1) put it in the same compose with service name `ollama`, or
+# 2) set OLLAMA_BASE_URL to a reachable host URL.
+
+version: '3.9'
+
+services:
+  app:
+    image: freestylewriter:latest
+    container_name: freestylewriter-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "43000:43000"
+    environment:
+      NODE_ENV: production
+      PORT: 43000
+
+      # IMPORTANT: use your external Llama only if on same compose/network.
+      # If Llama is on host network, use http://host.docker.internal:11434 and include host-gateway extra_hosts below.
+      AI_PROVIDER: ollama
+      LLM_PROVIDER: ollama
+      AI_FALLBACK_PROVIDER: huggingface
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.1:8b
+      OLLAMA_AUTOSTART: "false"
+      OLLAMA_PULL_ON_BOOT: "false"
+      LLM_REQUEST_TIMEOUT_MS: 30000
+      MAX_INTENT_CHARS: 50000
+      RESEARCH_TOPIC_COUNT: 3
+
+      # Security
+      OPERATOR_PASSCODE: "${OPERATOR_PASSCODE}"
+      AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET}"
+      UACP_PUBLIC_DEMO_ENABLED: "false"
+
+      # Persistence (choose one)
+      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_SSL: "true"
+
+      # Optional for local file mode only:
+      DATA_FILE_PATH: "/app/data/uacp-state.json"
+
+    volumes:
+      - app-data:/app/data
+
+    # If you point OLLAMA_BASE_URL to host.docker.internal, uncomment this:
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+  # Optional local Ollama in same stack (uncomment if you do not already have one)
+  #ollama:
+  #  image: ollama/ollama:latest
+  #  container_name: freestylewriter-ollama
+  #  restart: unless-stopped
+  #  environment:
+  #    OLLAMA_KEEP_ALIVE: 24h
+  #  volumes:
+  #    - ollama-data:/root/.ollama
+  #  ports:
+  #    - "11434:11434"
+  #  command: ["serve"]
+
+volumes:
+  app-data:
+  #ollama-data:
