@@ -32,9 +32,16 @@ At minimum:
   - and enable `host.docker.internal` mapping in compose extra hosts.
 
 ## 5) Persistence
-Option A (recommended): Add managed Postgres and set `DATABASE_URL`.
+Option A (recommended): Add managed Postgres and set `DATABASE_URL` to your DB DSN:
+- `postgres://USER:PASS@HOST:5432/DB`
 
-Option B: use local file mode (works immediately):
+Option B: bootstrap now without entering a manual DSN (still free):
+- The compose file can start an internal Postgres service automatically.
+- In that mode, omit `DATABASE_URL` and the app uses:
+  `postgres://barbankz:barbankz_local_password@postgres:5432/barbankz`
+- This is isolated to this compose stack and does not touch other apps.
+
+Option C: file mode
 - Keep `DATABASE_URL` empty.
 - Keep volume mapped: `/app/data` in docker-compose.
 - `DATA_FILE_PATH=/app/data/uacp-state.json`
@@ -63,3 +70,4 @@ Option B: use local file mode (works immediately):
 - The landing form now posts to `/api/leads`.
 - It accepts `{ "email": "you@domain.com", "source": "homepage_waitlist" }`.
 - Set `LEAD_CAPTURE_MAX` to cap stored leads (default 5000).
+- `/api/leads` now persists to `lead_captures` table when `DATABASE_URL` is present.

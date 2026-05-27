@@ -7,6 +7,22 @@
 version: '3.9'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: freestylewriter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-barbankz}
+      POSTGRES_USER: ${POSTGRES_USER:-barbankz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-barbankz_local_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-barbankz} -d ${POSTGRES_DB:-barbankz}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   app:
     image: freestylewriter:latest
     container_name: freestylewriter-app
@@ -16,6 +32,9 @@ services:
     restart: unless-stopped
     ports:
       - "43000:43000"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: 43000
@@ -39,8 +58,8 @@ services:
       UACP_PUBLIC_DEMO_ENABLED: "false"
 
       # Persistence (choose one)
-      DATABASE_URL: "${DATABASE_URL}"
-      DATABASE_SSL: "true"
+      DATABASE_URL: "${DATABASE_URL:-postgres://barbankz:barbankz_local_password@postgres:5432/barbankz}"
+      DATABASE_SSL: "${DATABASE_SSL:-false}"
 
       # Optional for local file mode only:
       DATA_FILE_PATH: "/app/data/uacp-state.json"
@@ -67,4 +86,5 @@ services:
 
 volumes:
   app-data:
+  postgres-data:
   #ollama-data:
